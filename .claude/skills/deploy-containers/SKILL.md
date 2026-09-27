@@ -603,7 +603,116 @@ echo "✅ EKS cluster ready — kubectl configured"
 kubectl get nodes
 ```
 
+After the cluster is ready, extract VPC context for downstream provisioning (ElastiCache, security groups):
+
+```bash
+EKS_VPC_ID=$(aws eks describe-cluster \
+    --name "${EKS_CLUSTER_NAME}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS} \
+    --query 'cluster.resourcesVpcConfig.vpcId' \
+    --output text)
+
+EKS_SUBNET_IDS=$(aws eks describe-cluster \
+    --name "${EKS_CLUSTER_NAME}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS} \
+    --query 'cluster.resourcesVpcConfig.subnetIds' \
+    --output json | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin)))")
+
+EKS_NODE_SG=$(aws eks describe-cluster \
+    --name "${EKS_CLUSTER_NAME}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS} \
+    --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' \
+    --output text)
+
+echo "✅ VPC: ${EKS_VPC_ID}"
+echo "   Subnets: ${EKS_SUBNET_IDS}"
+echo "   Node SG: ${EKS_NODE_SG}"
+```
+
+Save `EKS_VPC_ID`, `EKS_SUBNET_IDS`, and `EKS_NODE_SG` as session variables — Steps 2.k8s.1b and 2.k8s.3 reference them.
+
 **Using AWS CLI (if eksctl not available):** Show the equivalent `aws eks create-cluster` command (verbose, confirm before running). After cluster creation, create a managed node group with `aws eks create-nodegroup` and install the EBS CSI driver add-on.
+
+---
+
+#### Step 2.k8s.1b — IAM Role for AWS Load Balancer Controller (IRSA)
+
+*Run this step when a new EKS cluster was just provisioned AND `EKS_LBC_ROLE_ARN` is not set in `.env`.*
+
+```
+AWS Load Balancer Controller needs an IAM role (IRSA) to call the ELB API.
+  EKS_LBC_ROLE_ARN not found in .env.
+
+  1) Create it now  (downloads AWS LBC IAM policy, creates IRSA role via eksctl, installs LBC)
+  2) Skip           (port-forward access only — no ALB ingress; set EKS_LBC_ROLE_ARN later)
+
+  Choice [1/2]:
+```
+
+**On choice 1 — show each command and confirm before running:**
+
+```bash
+# Phase A — Download the IAM policy
+curl -o /tmp/aws-lbc-iam-policy.json \
+    https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
+```
+
+```bash
+# Phase B — Create the IAM policy (idempotent: catches AlreadyExists)
+POLICY_ARN=$(aws iam create-policy \
+    --policy-name AWSLoadBalancerControllerIAMPolicy \
+    --policy-document file:///tmp/aws-lbc-iam-policy.json \
+    ${CRED_FLAGS} \
+    --query 'Policy.Arn' --output text 2>/dev/null) \
+  || POLICY_ARN=$(aws iam list-policies \
+    --query "Policies[?PolicyName=='AWSLoadBalancerControllerIAMPolicy'].Arn | [0]" \
+    --output text ${CRED_FLAGS})
+echo "Policy ARN: ${POLICY_ARN}"
+```
+
+```bash
+# Phase C — Create IRSA service account (attaches policy, generates IAM role with OIDC trust)
+eksctl create iamserviceaccount \
+    --cluster "${EKS_CLUSTER_NAME}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    --namespace kube-system \
+    --name aws-load-balancer-controller \
+    --attach-policy-arn "${POLICY_ARN}" \
+    --override-existing-serviceaccounts \
+    --approve \
+    ${CRED_FLAGS}
+```
+
+```bash
+# Phase D — Extract role ARN and save to session + offer to persist to .env
+EKS_LBC_ROLE_ARN=$(eksctl get iamserviceaccount \
+    --cluster "${EKS_CLUSTER_NAME}" --region "${EKS_CLUSTER_REGION}" \
+    --name aws-load-balancer-controller --namespace kube-system \
+    ${CRED_FLAGS} -o json 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['status']['roleARN'])")
+echo "✅ EKS_LBC_ROLE_ARN=${EKS_LBC_ROLE_ARN}"
+```
+
+Offer to append `EKS_LBC_ROLE_ARN` to `.env` — credentials are never written to tracked files.
+
+```bash
+# Phase E — Install AWS Load Balancer Controller via Helm
+helm repo add eks https://aws.github.io/eks-charts 2>/dev/null || true
+helm repo update eks
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    -n kube-system \
+    --set clusterName="${EKS_CLUSTER_NAME}" \
+    --set serviceAccount.create=false \
+    --set serviceAccount.name=aws-load-balancer-controller \
+    --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="${EKS_LBC_ROLE_ARN}"
+echo "✅ AWS Load Balancer Controller installed"
+```
+
+**On choice 2:** Note that `kubectl port-forward svc/iap 3443:3443 -n itential` remains available for
+port-forward access to IAP without an ingress controller.
 
 ---
 
@@ -690,19 +799,120 @@ REDIS_PASSWORD="${redis_auth_token}"
 ITENTIAL_REDIS_PASSWORD="${REDIS_PASSWORD}"
 ```
 
-**Choice 3 — Provision ElastiCache:**
-```
-ElastiCache cluster name [itential-redis]:
-Node type [cache.r7g.large] (minimum) or [cache.r7g.xlarge] (production):
-Number of replicas [1]:
-```
-Show the `aws elasticache create-replication-group` command before running. After provisioning, retrieve the primary endpoint URL.
+**Choice 3 — Provision ElastiCache Redis OSS (VPC-aware, grade-sized):**
 
-Offer to persist to `.env`:
+If `EKS_VPC_ID` / `EKS_SUBNET_IDS` / `EKS_NODE_SG` are not already set (existing cluster path),
+fetch them first:
+
 ```bash
-REDIS_HOST=...
+EKS_VPC_ID=$(aws eks describe-cluster \
+    --name "${EKS_CLUSTER_NAME}" --region "${EKS_CLUSTER_REGION}" ${CRED_FLAGS} \
+    --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+
+EKS_SUBNET_IDS=$(aws eks describe-cluster \
+    --name "${EKS_CLUSTER_NAME}" --region "${EKS_CLUSTER_REGION}" ${CRED_FLAGS} \
+    --query 'cluster.resourcesVpcConfig.subnetIds' \
+    --output json | python3 -c "import sys,json; print(' '.join(json.load(sys.stdin)))")
+
+EKS_NODE_SG=$(aws eks describe-cluster \
+    --name "${EKS_CLUSTER_NAME}" --region "${EKS_CLUSTER_REGION}" ${CRED_FLAGS} \
+    --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+```
+
+Show and confirm each phase before running:
+
+```bash
+# Phase A — ElastiCache subnet group (reuses EKS VPC subnets)
+ELASTICACHE_SUBNET_GROUP="itential-${EKS_CLUSTER_NAME}-subnet"
+
+aws elasticache create-cache-subnet-group \
+    --cache-subnet-group-name "${ELASTICACHE_SUBNET_GROUP}" \
+    --cache-subnet-group-description "Itential repro — ${EKS_CLUSTER_NAME}" \
+    --subnet-ids ${EKS_SUBNET_IDS} \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS}
+echo "✅ Subnet group ${ELASTICACHE_SUBNET_GROUP} created"
+```
+
+```bash
+# Phase B — Security group allowing EKS nodes → ElastiCache on 6379
+ELASTICACHE_SG_ID=$(aws ec2 create-security-group \
+    --group-name "itential-elasticache-${EKS_CLUSTER_NAME}" \
+    --description "ElastiCache Redis — allow EKS nodes port 6379" \
+    --vpc-id "${EKS_VPC_ID}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS} \
+    --query 'GroupId' --output text)
+
+aws ec2 authorize-security-group-ingress \
+    --group-id "${ELASTICACHE_SG_ID}" \
+    --protocol tcp --port 6379 \
+    --source-group "${EKS_NODE_SG}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS}
+
+echo "✅ ElastiCache SG ${ELASTICACHE_SG_ID} — allows ${EKS_NODE_SG} on 6379"
+```
+
+```bash
+# Phase C — Redis OSS replication group (grade-aware sizing, AUTH enabled)
+REDIS_AUTH_TOKEN=$(openssl rand -hex 32)
+
+if [ "${K8S_CLUSTER_GRADE}" = "production" ]; then
+    CACHE_NODE_TYPE="cache.r7g.xlarge"
+else
+    CACHE_NODE_TYPE="cache.r7g.large"
+fi
+
+aws elasticache create-replication-group \
+    --replication-group-id "itential-${EKS_CLUSTER_NAME}-redis" \
+    --description "Itential ${K8S_CLUSTER_GRADE} repro Redis" \
+    --engine redis \
+    --engine-version "7.1" \
+    --cache-node-type "${CACHE_NODE_TYPE}" \
+    --num-cache-clusters 1 \
+    --auth-token "${REDIS_AUTH_TOKEN}" \
+    --at-rest-encryption-enabled \
+    --transit-encryption-enabled \
+    --cache-subnet-group-name "${ELASTICACHE_SUBNET_GROUP}" \
+    --security-group-ids "${ELASTICACHE_SG_ID}" \
+    --region "${EKS_CLUSTER_REGION}" \
+    ${CRED_FLAGS}
+
+echo "⏳ ElastiCache provisioning — typical wait: 5–8 minutes"
+```
+
+```bash
+# Phase D — Wait for available and extract endpoint (standard retry policy)
+MAX_RETRIES=5; DELAY=5
+for i in $(seq 1 $MAX_RETRIES); do
+    STATUS=$(aws elasticache describe-replication-groups \
+        --replication-group-id "itential-${EKS_CLUSTER_NAME}-redis" \
+        --region "${EKS_CLUSTER_REGION}" ${CRED_FLAGS} \
+        --query 'ReplicationGroups[0].Status' --output text 2>/dev/null)
+    [ "${STATUS}" = "available" ] && break
+    echo "[$i/$MAX_RETRIES] Status: ${STATUS} — retrying in ${DELAY}s"
+    sleep $DELAY
+done
+
+REDIS_HOST=$(aws elasticache describe-replication-groups \
+    --replication-group-id "itential-${EKS_CLUSTER_NAME}-redis" \
+    --region "${EKS_CLUSTER_REGION}" ${CRED_FLAGS} \
+    --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' \
+    --output text)
+
 REDIS_PORT=6379
-ITENTIAL_REDIS_PASSWORD=...
+ITENTIAL_REDIS_PASSWORD="${REDIS_AUTH_TOKEN}"
+
+echo "✅ Redis ready at ${REDIS_HOST}:${REDIS_PORT}"
+echo "   AUTH token: ${REDIS_AUTH_TOKEN:0:8}...  (full value offered for .env save below)"
+```
+
+Offer to persist (display AUTH token masked; write full value to `.env`):
+```bash
+REDIS_HOST=<extracted-endpoint>
+REDIS_PORT=6379
+ITENTIAL_REDIS_PASSWORD=<auth-token>
 ```
 
 ---
@@ -710,6 +920,43 @@ ITENTIAL_REDIS_PASSWORD=...
 #### Step 2.k8s.4 — EKS Prerequisites: Required K8s Components
 
 Check and install the required Kubernetes components for Itential on EKS.
+
+**macOS control-plane prereq check (run when uname is Darwin):**
+
+```bash
+if [[ "$(uname)" == "Darwin" ]]; then
+    echo "=== macOS Control-Plane Prerequisites ==="
+
+    brew --version > /dev/null 2>&1 \
+        && echo "✅ Homebrew available" \
+        || echo "❌ Homebrew not found — install from https://brew.sh"
+
+    aws --version 2>/dev/null | grep -q "aws-cli/2" \
+        && echo "✅ AWS CLI v2" \
+        || echo "❌ AWS CLI v2 not found — brew install awscli"
+
+    eksctl version > /dev/null 2>&1 \
+        && echo "✅ eksctl $(eksctl version)" \
+        || echo "⚠️  eksctl not found — brew install eksctl  (required for EKS provisioning)"
+
+    kubectl version --client > /dev/null 2>&1 \
+        && echo "✅ kubectl available" \
+        || echo "❌ kubectl not found — brew install kubectl"
+
+    HELM_VER_RAW=$(helm version --short 2>/dev/null)
+    [ -n "${HELM_VER_RAW}" ] \
+        && echo "✅ Helm ${HELM_VER_RAW}" \
+        || echo "❌ Helm not found — brew install helm"
+
+    docker info > /dev/null 2>&1 \
+        && echo "✅ Docker running (needed for ECR docker login)" \
+        || echo "⚠️  Docker not running — start Docker Desktop or OrbStack"
+
+    echo ""
+    echo "ℹ️  EKS worker nodes run in AWS — local RAM/CPU are not a constraint."
+    echo "   A MacBook with 8 GB RAM can provision and manage production-grade EKS."
+fi
+```
 
 **Check tool availability:**
 ```bash

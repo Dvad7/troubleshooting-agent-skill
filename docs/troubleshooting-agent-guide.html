@@ -2974,7 +2974,31 @@ REDIS_PASSWORD=s3cr3t
 SSH_HOST_1=10.0.1.42
 SSH_USER_1=ec2-user
 SSH_KEY_PATH_1=~/.ssh/customer_key.pem
-SSH_ROLE_1=iap</pre></div>
+SSH_ROLE_1=iap
+
+<span class="section-hdr"># ── /deploy-containers k8s — EKS reproduction environment ─────</span>
+<span class="comment"># Required when provisioning from scratch. See environments/k8s-example.env</span>
+<span class="comment"># for a full populated template with inline comments.</span>
+ECR_REGISTRY=497639811223.dkr.ecr.us-east-2.amazonaws.com
+K8S_CLUSTER_GRADE=minimum
+EKS_CLUSTER_NAME=itential-repro
+EKS_CLUSTER_REGION=us-east-2
+EKS_NODE_TYPE=m5a.xlarge           <span class="comment"># auto-set from grade</span>
+EKS_NODE_COUNT=2                   <span class="comment"># auto-set from grade</span>
+EKS_K8S_VERSION=1.31
+EKS_LBC_ROLE_ARN=                  <span class="comment"># auto-created by Step 2.k8s.1b for new clusters</span>
+MONGO_URL=mongodb+srv://itential:&lt;pass&gt;@cluster.mongodb.net/itential
+ITENTIAL_MONGO_PASSWORD=&lt;mongo-password&gt;
+REDIS_HOST=itential-repro.abc123.ng.0001.use2.cache.amazonaws.com
+REDIS_PORT=6379
+ITENTIAL_REDIS_PASSWORD=&lt;redis-auth-token&gt;
+ITENTIAL_ENCRYPTION_KEY=           <span class="comment"># auto-generated if blank</span>
+ITENTIAL_DEFAULT_USER_PASSWORD=&lt;admin-password&gt;
+K8S_NAMESPACE=itential
+K8S_CONTEXT=                       <span class="comment"># blank = current-context</span>
+K8S_INGRESS_TYPE=alb               <span class="comment"># skip ingress block for port-forward-only repro</span>
+K8S_ADAPTER_METHOD=pv
+K8S_ADAPTER_PV_SIZE=10Gi</pre></div>
   </div>
 
 
@@ -3022,6 +3046,32 @@ SSH_ROLE_1=iap</pre></div>
 <span class="key">AWS_SECRET_ACCESS_KEY</span>=
 <span class="key">KUBE_NAMESPACE</span>=<span class="val">itential</span>
 <span class="key">KUBE_POD_PATTERN</span>=<span class="val">iap-</span>
+
+<span class="section-hdr"># ── /deploy-containers — Kubernetes (EKS) reproduction ────────</span>
+<span class="comment"># Required when provisioning a new EKS cluster + ElastiCache Redis.</span>
+<span class="comment"># See environments/k8s-example.env for a complete populated example.</span>
+<span class="key">K8S_CLUSTER_GRADE</span>=                <span class="comment"># minimum | production</span>
+<span class="key">EKS_CLUSTER_NAME</span>=<span class="val">itential-repro</span>  <span class="comment"># used as prefix for ElastiCache/SG names</span>
+<span class="key">EKS_CLUSTER_REGION</span>=<span class="val">us-east-2</span>
+<span class="key">EKS_NODE_TYPE</span>=                    <span class="comment"># auto-set from grade: m5a.xlarge (min) | c6a.4xlarge (prod)</span>
+<span class="key">EKS_NODE_COUNT</span>=                   <span class="comment"># auto-set: 2 (minimum) | 3 (production)</span>
+<span class="key">EKS_K8S_VERSION</span>=<span class="val">1.31</span>
+<span class="key">EKS_LBC_ROLE_ARN</span>=                 <span class="comment"># IAM role ARN for AWS Load Balancer Controller (IRSA)</span>
+                                   <span class="comment"># Step 2.k8s.1b auto-creates for new clusters</span>
+<span class="key">MONGO_URL</span>=                         <span class="comment"># mongodb+srv://... or mongodb://host:port/db (external — required)</span>
+<span class="key">ITENTIAL_MONGO_PASSWORD</span>=
+<span class="key">REDIS_HOST</span>=                        <span class="comment"># ElastiCache primary endpoint (external — required)</span>
+<span class="key">REDIS_PORT</span>=<span class="val">6379</span>
+<span class="key">ITENTIAL_REDIS_PASSWORD</span>=           <span class="comment"># Redis AUTH token; blank if no auth</span>
+<span class="key">ITENTIAL_ENCRYPTION_KEY</span>=           <span class="comment"># 64-char hex; auto-generated if blank</span>
+<span class="key">ITENTIAL_DEFAULT_USER_PASSWORD</span>=
+<span class="key">TLS_CA_CERT_PATH</span>=                  <span class="comment"># path to CA cert (skip for port-forward repro)</span>
+<span class="key">K8S_INGRESS_TYPE</span>=<span class="val">alb</span>              <span class="comment"># alb | nginx (skip ingress for port-forward repro)</span>
+<span class="key">K8S_HOSTNAME</span>=                      <span class="comment"># FQDN for IAP ingress</span>
+<span class="key">K8S_INGRESS_SCHEME</span>=<span class="val">internet-facing</span>
+<span class="key">ACM_CERT_ARN</span>=                      <span class="comment"># ACM cert ARN for ALB TLS</span>
+<span class="key">K8S_ADAPTER_METHOD</span>=<span class="val">pv</span>             <span class="comment"># pv (persistent volumes) | layered</span>
+<span class="key">K8S_ADAPTER_PV_SIZE</span>=<span class="val">10Gi</span>
 
 <span class="section-hdr"># ── IAG ────────────────────────────────────────────────────────</span>
 <span class="key">IAG_URL</span>=<span class="val">http://localhost:8083</span>
@@ -3083,6 +3133,7 @@ SSH_ROLE_1=iap</pre></div>
           <tr><td><code>REDIS_HOST</code> + port</td><td><span class="pill pill-opt">Optional</span></td><td>Bull queue depth, eviction status, blocked clients, Redis memory analysis</td></tr>
           <tr><td><code>SSH_HOST_N</code> blocks</td><td><span class="pill pill-opt">Optional</span></td><td>OS-level diagnostics, log collection from VMs, <code>journalctl</code>, disk/FD analysis on each host</td></tr>
           <tr><td><code>KUBE_NAMESPACE</code></td><td><span class="pill pill-opt">Optional</span></td><td>kubectl pod status, EKS node health, container log collection via kubectl/stern</td></tr>
+          <tr><td><code>K8S_CLUSTER_GRADE</code> + <code>EKS_*</code> + <code>ITENTIAL_*</code> + Redis/Mongo</td><td><span class="pill pill-cond">Conditional</span></td><td><strong>/deploy-containers k8s:</strong> provisions EKS cluster + ElastiCache Redis (VPC-coordinated) + deploys IAP via Helm; requires eksctl, kubectl, Helm 3.15+</td></tr>
           <tr><td><code>AWS_ACCESS_KEY_ID</code></td><td><span class="pill pill-cond">Conditional</span></td><td>CloudWatch log access, ALB log access from S3, ElastiCache metrics — needed for AWS deployments</td></tr>
           <tr><td><code>IAG_URL</code> + credentials</td><td><span class="pill pill-cond">Conditional</span></td><td>IAG direct health check, service list, job history — needed for IAG-related issues</td></tr>
           <tr><td><code>PROMETHEUS_URL</code></td><td><span class="pill pill-opt">Optional</span></td><td>WFE CPU, heap, event loop lag, GC overhead metrics — unlocks Phase 6 of /troubleshoot-jobs</td></tr>
@@ -4773,11 +4824,11 @@ tofu destroy \
       </div>
       <div class="rule-item">
         <div class="rule-label">2.k8s.3 — Redis</div>
-        <div class="rule-body">Three options: AWS ElastiCache (provide endpoint), existing Redis host, or provision a new ElastiCache cluster (shows <code>aws elasticache create-replication-group</code> command before running). Sets <code>REDIS_HOST</code>, <code>REDIS_PORT</code>, and <code>ITENTIAL_REDIS_PASSWORD</code>. Helm charts do NOT include Redis — external required.</div>
+        <div class="rule-body">Three options: existing ElastiCache endpoint, existing Redis host, or <strong>provision AWS ElastiCache Redis OSS in-VPC</strong> (VPC-coordinated — four phases: ElastiCache subnet group using EKS subnets, security group allowing EKS node SG → port 6379, grade-sized replication group with AUTH + TLS, wait-for-available and endpoint extraction). Sets <code>REDIS_HOST</code>, <code>REDIS_PORT</code>, and <code>ITENTIAL_REDIS_PASSWORD</code>. Helm charts do NOT include Redis — external required.</div>
       </div>
       <div class="rule-item">
         <div class="rule-label">2.k8s.4 — EKS prerequisites</div>
-        <div class="rule-body">Checks and optionally installs: <strong>cert-manager</strong> (required for TLS), <strong>AWS Load Balancer Controller</strong> (requires IRSA IAM role — <code>EKS_LBC_ROLE_ARN</code> in <code>.env</code>), <strong>EBS CSI driver</strong> (<code>ebs.csi.aws.com</code> provisioner — do NOT use EFS/NFS), and <strong>ExternalDNS</strong> (optional). Each component shows its install command and requires "yes / skip" approval. Prints a preflight summary table before proceeding to Step 5.</div>
+        <div class="rule-body">Runs macOS tool check first (Homebrew, AWS CLI v2, eksctl, kubectl, Helm, Docker). Then checks and optionally installs: <strong>cert-manager</strong> (required for TLS), <strong>AWS Load Balancer Controller</strong> (IRSA role auto-created in Step 2.k8s.1b for new clusters; set <code>EKS_LBC_ROLE_ARN</code> for existing clusters), <strong>EBS CSI driver</strong> (<code>ebs.csi.aws.com</code> provisioner — do NOT use EFS/NFS), and <strong>ExternalDNS</strong> (optional). Each component shows its install command and requires "yes / skip" approval. Prints a preflight summary table before proceeding to Step 5.</div>
       </div>
       <div class="rule-item">
         <div class="rule-label">Step 5b — secrets (K8s)</div>

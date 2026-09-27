@@ -1,5 +1,25 @@
 # Kubernetes Prerequisites
 
+## macOS as Control Plane
+
+Running `/deploy-containers k8s` from macOS is fully supported. All EKS worker nodes run in AWS —
+the Mac is only the operator machine, so local RAM and CPU are not a bottleneck.
+
+**Required tools (install once via Homebrew):**
+
+```bash
+brew install awscli          # AWS CLI v2 — ECR auth, EKS cluster ops, ElastiCache provisioning
+brew install eksctl           # eksctl ≥ 0.190 — cluster provisioning and IRSA role creation
+brew install kubectl          # kubectl — cluster management, Helm lifecycle
+brew install helm             # Helm 3.15+ — IAP/IAG chart installs
+```
+
+Docker Desktop or OrbStack must be running for `docker login` (ECR token step). It does not run any Itential workloads locally.
+
+**AWS credentials:** configure via `aws configure sso` (recommended) or a static IAM key. The engineer selects the profile in Step 1 of the skill.
+
+---
+
 ## Cluster Requirements
 
 | Requirement | Minimum | Notes |
@@ -35,6 +55,41 @@ Both MongoDB and Redis must be accessible from inside the cluster **before** ins
 - Version: 7.x recommended
 - IAP needs AUTH password access if Redis is auth-enabled
 - For reproduction: a single Redis container outside the cluster with a simple password is sufficient
+
+## VPC / Networking Requirements
+
+ElastiCache Redis and the EKS cluster **must be in the same VPC**. The skill handles this
+automatically when provisioning from scratch, but when connecting to an existing cluster you need:
+
+1. **ElastiCache subnet group** — must reference subnets from the EKS VPC.
+   Look up the VPC and subnets of an existing cluster:
+   ```bash
+   aws eks describe-cluster --name <cluster> --region <region> \
+       --query 'cluster.resourcesVpcConfig.{vpcId:vpcId,subnetIds:subnetIds}'
+   ```
+
+2. **Security group rule** — EKS node security group → ElastiCache port 6379.
+   Get the node security group:
+   ```bash
+   aws eks describe-cluster --name <cluster> --region <region> \
+       --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text
+   ```
+   Then authorize ingress on port 6379 in the ElastiCache security group from that SG ID.
+
+3. **Transit encryption** — ElastiCache clusters provisioned by the skill use TLS (`--transit-encryption-enabled`). The Redis client in IAP connects with TLS by default on Redis 7.x.
+
+---
+
+## IAM Roles Required
+
+| Role | Who needs it | How the skill creates it |
+|---|---|---|
+| EKS node role with ECR read | All paths — nodes pull IAP images from ECR | Created automatically by `eksctl create cluster`; the skill adds ECR read inline if missing (see "Option B — IAM role on nodes" in ECR section) |
+| LBC IRSA role (`AWSLoadBalancerControllerIAMPolicy`) | ALB ingress only | Step 2.k8s.1b provisions this automatically for new clusters via `eksctl create iamserviceaccount`; set `EKS_LBC_ROLE_ARN` in `.env` for existing clusters |
+
+Port-forward access (`kubectl port-forward svc/iap 3443:3443 -n itential`) requires neither role.
+
+---
 
 ## ECR Access from Cluster
 

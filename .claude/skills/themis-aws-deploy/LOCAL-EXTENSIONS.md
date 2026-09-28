@@ -960,12 +960,62 @@ EC2 instances accrue AWS spend until destroyed. Destroy command when done:
 
 ---
 
+### CPU / Memory Allocation Breakdown (per-role)
+
+Before the confirmation prompt, resolve the instance type for each role and count how many
+hosts of that role the chosen `<architecture>` actually creates — never assume a fixed count;
+read it from the tfvars file, since it varies by architecture (`aio`=1 combined host,
+`minimal`=4 dedicated hosts, `ha2`=9, `asa`=up to 18):
+
+```bash
+# Instance types — override via .env, default t3.medium for every role
+PLATFORM_TYPE="${AWS_INSTANCE_TYPE_PLATFORM:-t3.medium}"
+REDIS_TYPE="${AWS_INSTANCE_TYPE_REDIS:-t3.medium}"
+MONGODB_TYPE="${AWS_INSTANCE_TYPE_MONGODB:-t3.medium}"
+GATEWAY_TYPE="${AWS_INSTANCE_TYPE_GATEWAY:-t3.medium}"
+
+# Host count per role — read from the architecture's tfvars, not hardcoded
+grep -E "^(platform|redis|mongodb|gateway)_count" \
+  "<themis_root>/vms/aws/tfvars/<architecture>.tfvars" 2>/dev/null \
+  || echo "Role counts not found in tfvars — inspect <architecture>.tfvars manually before confirming"
+```
+
+```python
+EC2_SPECS = {
+    "t3.medium": (2, 4),  "t3.large": (2, 8),  "t3.xlarge": (4, 16),
+    "m5.xlarge": (4, 16), "m5a.xlarge": (4, 16), "c6a.4xlarge": (16, 32),
+}
+# vcpu, ram_gb = EC2_SPECS.get(ROLE_TYPE, ("?", "?"))
+```
+
+```
+══════════════════════════════════════════════════════════════════════
+  CPU / MEMORY ALLOCATION — <architecture>/<os>
+══════════════════════════════════════════════════════════════════════
+  Role      │ Instance type   │ Hosts │ vCPU/host │ RAM/host │ Role total
+  ──────────┼─────────────────┼───────┼───────────┼──────────┼───────────
+  Platform  │ <PLATFORM_TYPE> │ <N>   │ <vcpu>    │ <ram> GB │ <N×vcpu> / <N×ram> GB
+  MongoDB   │ <MONGODB_TYPE>  │ <N>   │ <vcpu>    │ <ram> GB │ <N×vcpu> / <N×ram> GB
+  Redis     │ <REDIS_TYPE>    │ <N>   │ <vcpu>    │ <ram> GB │ <N×vcpu> / <N×ram> GB
+  Gateway   │ <GATEWAY_TYPE>  │ <N>   │ <vcpu>    │ <ram> GB │ <N×vcpu> / <N×ram> GB
+  ──────────┴─────────────────┴───────┴───────────┴──────────┴───────────
+  TOTAL: <N> VM(s) — <sum of vCPU> vCPU / <sum of RAM> GB
+══════════════════════════════════════════════════════════════════════
+```
+
+If any `AWS_INSTANCE_TYPE_*` override is unset in `.env`, the row shows `t3.medium (default —
+not explicitly set)` so the engineer notices before confirming, rather than silently
+assuming they chose it.
+
+---
+
 ### Confirmation Prompt (Hard Stop)
 
 Present this and **wait for engineer input** before executing any Step 3 command:
 
 ```
-All checks passed. Ready to provision <N> VM(s) for <architecture>/<os> on <aws_profile>.
+All checks passed. Ready to provision <N> VM(s) for <architecture>/<os> on <aws_profile>
+(see CPU/Memory Allocation Breakdown above — <sum of vCPU> vCPU / <sum of RAM> GB total).
 
 Proceed with tofu apply? (yes / no / show-run-vars)
 ```
@@ -976,3 +1026,5 @@ Proceed with tofu apply? (yes / no / show-run-vars)
 
 **No other response proceeds.** Claude does not infer "yes" from silence, prior messages,
 or `--auto` flags. The engineer must type "yes" in the chat in response to this prompt.
+This confirmation is never skipped — it fires identically whether the skill was invoked
+directly or wrapped by `/deploy-containers` picking the "VMs on AWS (Themis)" option.

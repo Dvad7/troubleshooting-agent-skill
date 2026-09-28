@@ -174,6 +174,7 @@ These apply in every troubleshooting session:
 - **ENG tickets** — present the bug report draft and wait for approval before filing
 - **Adapter debug mode** — always disable `auth_logging` and reset `console_level` to `error` before ending a session; debug mode exposes credentials in logs
 - **Adapter PUT** — does not support partial updates; always GET the current settings, modify in-place, then PUT the full body
+- **Environment provisioning confirmation** — before creating any billable/compute resource for a reproduction environment (EC2 instances via Themis or `/deploy-containers`, EKS clusters, DocumentDB, ElastiCache, or Docker containers), show the engineer which deployment method is being used and the exact CPU/memory each component (Platform, MongoDB, Redis, Gateway, adapters) will get, and require an explicit "yes" before proceeding. See `/deploy-containers` Step 3d (Docker paths) and Step 5c.5 (Kubernetes, consolidated across all components), and `/themis-aws-deploy`'s `LOCAL-EXTENSIONS.md` "CPU / Memory Allocation Breakdown" (part of the Step 2a Pre-Build Confirmation Gate)
 
 ## Connectivity Retry Policy (Non-Negotiable)
 

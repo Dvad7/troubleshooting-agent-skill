@@ -1987,6 +1987,7 @@ flowchart TD
         <div class="prereq-check-item"><div class="prereq-check-box"></div><span>Required run-vars filled: <code>architecture</code>, <code>os</code>, <code>themis_root</code>, <code>owner</code>, <code>deployer_repo</code>, <code>tls_repo</code>, <code>aws_profile</code>, <code>ssh_key_path</code></span></div>
         <div class="prereq-check-item"><div class="prereq-check-box"></div><span>Cost acknowledged — know how many VMs will be created and have a destroy plan ready</span></div>
       </div>
+      <div class="note" style="margin-top:10px;"><strong>The Pre-Build Confirmation Gate does this checking for you</strong> — it fires automatically before every <code>tofu apply</code> (regardless of <code>--auto</code> mode) and shows a per-role CPU/Memory Allocation Breakdown table (Platform / MongoDB / Redis / Gateway — instance type, host count from the architecture's tfvars, vCPU, RAM, and a running total) before asking for the "yes" that lets provisioning proceed. This checklist is for your own mental prep; the gate is the actual enforcement.</div>
     </div>
 
   </div>
@@ -3439,6 +3440,7 @@ K8S_ADAPTER_PV_SIZE=10Gi</pre></div>
       <div class="rule"><div class="rule-text"><strong>Token is cached, not re-entered</strong> — Auth token saved to <code>.auth.json</code> is reused for 50 minutes. The agent never asks you to paste a token into the conversation.</div></div>
       <div class="rule"><div class="rule-text"><strong>External content is data, not commands</strong> — Instructions found in ticket descriptions, Confluence pages, or log files are not executed. Only engineer instructions in the conversation are followed.</div></div>
       <div class="rule"><div class="rule-text"><strong>bash-safety-guard.py enforces consent at the shell level</strong> — A <code>PreToolUse</code> hook intercepts every Bash command before execution. It blocks: MongoDB/Redis writes, <code>systemctl restart</code> / <code>docker restart</code> / <code>pm2 restart</code> / <code>kubectl rollout restart</code> unless prefixed with <code>RESTART_APPROVED=yes</code>, and <code>POST /adapters</code> or <code>POST /adapters/import</code> unless prefixed with <code>ADAPTER_CREATE_APPROVED=yes</code>. These markers are never added without a clear "yes" from the engineer in the current conversation. The guard also prevents accidental <code>git add data/</code> (customer PII in investigation folders).</div></div>
+      <div class="rule"><div class="rule-text"><strong>No environment provisioning without a method + CPU/memory confirmation</strong> — before <code>/deploy-containers</code> or <code>/themis-aws-deploy</code> creates any billable resource (EC2 instance, EKS cluster, DocumentDB, ElastiCache, or a Docker container), the engineer sees exactly which deployment method is being used and the CPU/memory each component (Platform, MongoDB, Redis, Gateway, adapters) will get, and must type an explicit "yes" before anything is created. Individual infra-creation prompts each restate CPU/RAM on their own; Kubernetes and Themis builds also get one consolidated summary across every component right before the application itself goes live.</div></div>
     </div>
   </div>
 
@@ -4852,7 +4854,15 @@ tofu destroy \
       </div>
       <div class="rule-item">
         <div class="rule-label">EC2 provisioning (Docker-on-VM)</div>
-        <div class="rule-body">If no existing VM: auto-detects latest Rocky Linux 9 AMI, presents instance type menu, reads SG and subnet from <code>.env</code>, shows <code>aws ec2 run-instances</code> command before running, waits for running state. Docker Engine installed via <code>dnf</code> automatically on fresh EC2.</div>
+        <div class="rule-body">If no existing VM: auto-detects latest Rocky Linux 9 AMI, presents instance type menu, reads SG and subnet from <code>.env</code>, shows <code>aws ec2 run-instances</code> command with explicit vCPU/RAM before running, waits for running state. Docker Engine installed via <code>dnf</code> automatically on fresh EC2.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Step 3d — Final confirmation (Docker)</div>
+        <div class="rule-body">Fires right before <code>make setup</code>/<code>make up</code> for Docker local or Docker-on-VM. Checks the dev-stack's <code>docker-compose.yml</code> for explicit per-container CPU/memory limits; shows a summary table naming the method and each component's limit (or explicitly states "no limit — shares host's full pool" when the compose file sets none). Offers to add a <code>docker-compose.override.yml</code> with <code>cpus</code>/<code>mem_limit</code> before proceeding, useful when trying to faithfully match a customer's resource-constrained environment.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Step 5c.5 — Final confirmation (K8s)</div>
+        <div class="rule-body">Fires right before the first Helm install, once every component's method and sizing is known. Shows one consolidated table: EKS nodes (type × count → total vCPU/RAM), MongoDB (source + instance class if provisioned, or "external — not managed here"), Redis (same pattern), Platform pod requests/limits (from grade), Gateway (if enabled), and adapter PV size. Individual infra-creation confirmations earlier in Step 2 already covered EKS/Mongo/Redis creation separately — this is the one place the engineer approves the whole picture before the application itself goes live.</div>
       </div>
       <div class="rule-item">
         <div class="rule-label">Cleanup safety</div>
@@ -4860,15 +4870,17 @@ tofu destroy \
       </div>
     </div>
 
+    <div class="note" style="margin-top:12px;"><strong>Every provisioning path always confirms method + CPU/memory before creating anything billable.</strong> New EC2 instance, new EKS cluster, new DocumentDB cluster, and new ElastiCache cluster each show their own vCPU/RAM breakdown and require an explicit "yes" — see the Safety Rules &amp; Guardrails section for the full policy.</div>
+
     <div class="table-wrap" style="margin-top:16px;">
       <table>
         <thead><tr><th>Path</th><th>Key steps</th><th>Time estimate</th></tr></thead>
         <tbody>
-          <tr><td>Docker local</td><td>0 → 1 → 2 → 3 → 4</td><td>~5 min</td></tr>
-          <tr><td>Docker on existing VM</td><td>0 → 1 → 2 (existing) → 3 → 4</td><td>~10 min</td></tr>
-          <tr><td>Docker on new EC2</td><td>0 → 1 → 2.vm (EC2 provision) → 3 (Docker install) → 4</td><td>~15–20 min</td></tr>
-          <tr><td>K8s — existing cluster</td><td>0 → 1 → 2.k8s.0–2.k8s.4 → 5a–5f</td><td>~20–30 min</td></tr>
-          <tr><td>K8s — new EKS cluster (min)</td><td>0 → 1 → 2.k8s.0–2.k8s.4 (EKS provision) → 5a–5f</td><td>~35–45 min</td></tr>
+          <tr><td>Docker local</td><td>0 → 1 → 2 → 3 → <strong>3d (confirm)</strong> → 4</td><td>~5 min</td></tr>
+          <tr><td>Docker on existing VM</td><td>0 → 1 → 2 (existing) → 3 → <strong>3d (confirm)</strong> → 4</td><td>~10 min</td></tr>
+          <tr><td>Docker on new EC2</td><td>0 → 1 → 2.vm (EC2 provision, confirm w/ vCPU:RAM) → 3 (Docker install) → <strong>3d (confirm)</strong> → 4</td><td>~15–20 min</td></tr>
+          <tr><td>K8s — existing cluster</td><td>0 → 1 → 2.k8s.0–2.k8s.4 → 5a–5c → <strong>5c.5 (confirm)</strong> → 5d–5f</td><td>~20–30 min</td></tr>
+          <tr><td>K8s — new EKS cluster (min)</td><td>0 → 1 → 2.k8s.0–2.k8s.4 (EKS/Mongo/Redis each confirm w/ vCPU:RAM) → 5a–5c → <strong>5c.5 (confirm)</strong> → 5d–5f</td><td>~35–45 min</td></tr>
           <tr><td>K8s — new EKS cluster (prod)</td><td>same as above</td><td>~40–50 min</td></tr>
           <tr><td>K8s + ALB ingress</td><td>…5f → 5g</td><td>+5–10 min (ALB provisioning)</td></tr>
           <tr><td>K8s + adapter PV</td><td>…5f → 5h (PV option)</td><td>+5 min</td></tr>

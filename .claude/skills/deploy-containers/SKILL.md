@@ -12,6 +12,7 @@ Provisions an Itential Platform reproduction environment using Docker Compose (l
 
 ## CRITICAL SAFETY RULES
 
+- **Never create a billable/compute resource without a final confirmation showing method + CPU/memory** — before the first EC2 instance, EKS cluster, DocumentDB cluster, ElastiCache cluster, or Docker container is created, show the engineer which method is being used and the exact CPU/RAM each component will get (see Step 3d for Docker paths, Step 5c.5 for the consolidated K8s confirmation, and the per-component confirmations in Step 2.k8s.1/2.k8s.2/2.k8s.3). Individual infrastructure-creation confirmations do not substitute for this — each one must independently state CPU/RAM, not just "yes to proceed"
 - **Never run `make clean` without explicit engineer approval** — it destroys MongoDB data volumes and is irreversible
 - **Never run `kubectl delete namespace` without explicit approval** — removes all secrets, PVCs, and running workloads
 - **Never store ECR credentials in any tracked file** — use CRED_MODE pattern (profile or env vars); credentials stay in session variables only
@@ -392,16 +393,23 @@ Show the full command before running:
 
 ```
 ══════════════════════════════════════════════════════════════
-  Proposed EC2 instance:
+  FINAL CONFIRMATION — Docker on VM (new EC2 instance)
 ══════════════════════════════════════════════════════════════
+  Method:           Docker Compose on a newly provisioned EC2 instance
   Region:           {REGION}
   AMI:              {ROCKY9_AMI}  (Rocky Linux 9, x86_64)
-  Instance type:    {INSTANCE_TYPE}
+  Instance type:    {INSTANCE_TYPE}  ({vCPU from the Step 2.vm.1 menu} vCPU / {RAM} GB RAM)
   Key pair:         {KEY_NAME}
   Security groups:  {SG_IDS}
   Subnet:           {SUBNET_ID}
   Root volume:      60 GiB gp3
   Name tag:         itential-docker-repro
+
+  Platform, MongoDB, Redis (and Gateway if enabled) will share this
+  single VM's {vCPU} vCPU / {RAM} GB — Docker Compose does not set
+  explicit per-container CPU/memory limits by default, so all
+  containers draw from the same pool. See Step 4-pre for the option
+  to constrain individual containers before starting the stack.
 
   aws ec2 run-instances \
     --image-id {ROCKY9_AMI} \
@@ -655,6 +663,13 @@ Check if `eksctl` is available:
 eksctl version > /dev/null 2>&1 && EKS_TOOL=eksctl || EKS_TOOL=awscli
 ```
 
+Write the generated ClusterConfig to `environments/eks/{EKS_CLUSTER_NAME}.yaml` (repo-relative, not `/tmp`) so it survives past this session for later inspection or re-use — this path is gitignored (`environments/eks/`) since cluster naming/region is per-engineer, not a shared template:
+
+```bash
+mkdir -p environments/eks
+EKS_CONFIG_PATH="environments/eks/${EKS_CLUSTER_NAME}.yaml"
+```
+
 **Using eksctl (preferred):** Show config and confirm before running:
 
 ```yaml
@@ -690,20 +705,48 @@ addons:
   - name: kube-proxy
 ```
 
-```
-Provision EKS cluster '{EKS_CLUSTER_NAME}' in {EKS_CLUSTER_REGION}?
-  Node type:  {EKS_NODE_TYPE}
-  Nodes:      {EKS_NODE_COUNT} ({K8S_CLUSTER_GRADE})
-  K8s:        {EKS_K8S_VERSION}
-  Add-ons:    aws-ebs-csi-driver, vpc-cni, coredns, kube-proxy
+Compute the per-node and total cluster specs from a static instance-type lookup table (no AWS API call needed — these are published EC2 specs):
 
-This will take 15–20 minutes and incur AWS costs.
+```python
+EC2_SPECS = {
+    "t3.large":    (2, 8),    "t3.xlarge":   (4, 16),
+    "m5.xlarge":   (4, 16),   "m5a.xlarge":  (4, 16),
+    "c6a.4xlarge": (16, 32),
+}
+vcpu, ram_gb = EC2_SPECS.get(EKS_NODE_TYPE, ("?", "?"))
+total_vcpu = vcpu * EKS_NODE_COUNT if vcpu != "?" else "?"
+total_ram = ram_gb * EKS_NODE_COUNT if ram_gb != "?" else "?"
+```
+
+```
+══════════════════════════════════════════════════════════════
+  FINAL CONFIRMATION — Kubernetes (EKS) Provisioning
+══════════════════════════════════════════════════════════════
+  Method:        Provision new EKS cluster (eksctl)
+  Cluster:       {EKS_CLUSTER_NAME} in {EKS_CLUSTER_REGION}
+  Kubernetes:    {EKS_K8S_VERSION}
+  Grade:         {K8S_CLUSTER_GRADE}
+
+  Node type:     {EKS_NODE_TYPE}  ({vcpu} vCPU / {ram_gb} GB RAM per node)
+  Node count:    {EKS_NODE_COUNT}
+  Cluster total: {total_vcpu} vCPU / {total_ram} GB RAM
+
+  Add-ons:       aws-ebs-csi-driver, vpc-cni, coredns, kube-proxy
+
+  MongoDB / Redis / Platform / Gateway compute is NOT yet included in
+  this total — each is confirmed separately as it's provisioned
+  (Steps 2.k8s.2, 2.k8s.3, 5d) and a final combined summary is shown
+  again before the first Helm install (Step 5d).
+
+This will take 15–20 minutes and incur AWS costs for as long as the
+cluster and its nodes exist.
 Type 'yes create cluster' to confirm:
+══════════════════════════════════════════════════════════════
 ```
 
 On confirmation:
 ```bash
-eksctl create cluster -f /tmp/eks-cluster-config.yaml \
+eksctl create cluster -f "${EKS_CONFIG_PATH}" \
     ${CRED_FLAGS}
 
 # Configure kubectl
@@ -876,7 +919,24 @@ AWS DocumentDB cluster name [itential-mongo]:
 Instance class [db.r6g.large] (minimum) or [db.r6g.2xlarge] (production):
 Number of instances [2]:
 ```
-Show and confirm the `aws docdb create-db-cluster` + `create-db-instance` commands before running. After provisioning, retrieve the endpoint and set `MONGO_URL`.
+
+Show an explicit confirmation with CPU/memory before running (`db.r6g.large` = 2 vCPU / 16 GB per instance; `db.r6g.2xlarge` = 8 vCPU / 64 GB per instance):
+
+```
+══════════════════════════════════════════════════════════════
+  FINAL CONFIRMATION — Provision AWS DocumentDB (MongoDB)
+══════════════════════════════════════════════════════════════
+  Method:          Provision new DocumentDB cluster
+  Cluster name:    {cluster name}
+  Instance class:  {instance class}  ({vCPU} vCPU / {RAM} GB per instance)
+  Instances:       {N}  → total {N × vCPU} vCPU / {N × RAM} GB
+
+This will incur AWS costs for as long as the cluster exists.
+Type 'yes provision documentdb' to confirm:
+══════════════════════════════════════════════════════════════
+```
+
+Then show and confirm the `aws docdb create-db-cluster` + `create-db-instance` commands before running. After provisioning, retrieve the endpoint and set `MONGO_URL`.
 
 Offer to persist to `.env`:
 ```bash
@@ -976,11 +1036,29 @@ echo "✅ ElastiCache SG ${ELASTICACHE_SG_ID} — allows ${EKS_NODE_SG} on 6379"
 REDIS_AUTH_TOKEN=$(openssl rand -hex 32)
 
 if [ "${K8S_CLUSTER_GRADE}" = "production" ]; then
-    CACHE_NODE_TYPE="cache.r7g.xlarge"
+    CACHE_NODE_TYPE="cache.r7g.xlarge"   # 4 vCPU / 26 GB
 else
-    CACHE_NODE_TYPE="cache.r7g.large"
+    CACHE_NODE_TYPE="cache.r7g.large"    # 2 vCPU / 13 GB
 fi
+```
 
+```
+══════════════════════════════════════════════════════════════
+  FINAL CONFIRMATION — Provision AWS ElastiCache (Redis)
+══════════════════════════════════════════════════════════════
+  Method:          Provision new ElastiCache replication group
+  Grade:           {K8S_CLUSTER_GRADE}
+  Node type:       {CACHE_NODE_TYPE}  ({2 or 4} vCPU / {13 or 26} GB)
+  Cache clusters:  1
+
+This will incur AWS costs for as long as the replication group exists.
+Type 'yes provision elasticache' to confirm:
+══════════════════════════════════════════════════════════════
+```
+
+On confirmation:
+
+```bash
 aws elasticache create-replication-group \
     --replication-group-id "itential-${EKS_CLUSTER_NAME}-redis" \
     --description "Itential ${K8S_CLUSTER_GRADE} repro Redis" \
@@ -1343,6 +1421,50 @@ BIND_ADDRESS=127.0.0.1:
 
 ---
 
+### Step 3d — Final Deployment & Resource Confirmation
+
+**This is the last checkpoint before any container is started.** Check the dev stack's own `docker-compose.yml` for explicit `deploy.resources` / `cpus` / `mem_limit` settings on the platform, MongoDB, Redis, and gateway services:
+
+```bash
+grep -A3 -E "^\s*(cpus|mem_limit|mem_reservation):" "${DEVSTACK_DIR}/docker-compose.yml" 2>/dev/null \
+  || echo "No explicit per-service CPU/memory limits found in docker-compose.yml"
+```
+
+Present the final summary and require explicit approval before starting anything:
+
+```
+══════════════════════════════════════════════════════════════
+  FINAL CONFIRMATION — {Docker local | Docker on VM}
+══════════════════════════════════════════════════════════════
+  Method:        {Docker Compose — this machine | Docker Compose on {SSH_HOST}}
+  IAP version:   {IAP_VERSION}
+  Gateway:       {none | IAG4 {version} | IAG5 {version}}
+
+  Container resource limits:
+    Platform:    {explicit limit found in docker-compose.yml, or
+                  "No explicit limit — shares {host}'s full CPU/RAM pool"}
+    MongoDB:     {same pattern}
+    Redis:       {same pattern}
+    Gateway:     {same pattern, if enabled}
+
+  {If Docker local: "Host: this machine — Docker Desktop's configured
+   resource pool (Settings → Resources) is the effective ceiling."}
+  {If Docker on VM (existing): "Host: {SSH_HOST} — whatever CPU/RAM that
+   VM has is the effective ceiling; not managed by this session."}
+  {If Docker on VM (freshly provisioned in this session): "Host: the
+   {INSTANCE_TYPE} instance provisioned above ({vCPU} vCPU / {RAM} GB) —
+   already confirmed."}
+
+Proceed and start the stack? [yes / set limits first / abort]:
+══════════════════════════════════════════════════════════════
+```
+
+**On "set limits first":** offer to add `cpus:` / `mem_limit:` overrides to a `docker-compose.override.yml` for services the engineer wants constrained (useful when trying to faithfully reproduce a customer's resource-constrained environment), then re-present this confirmation.
+
+**On "yes":** proceed to Step 4.
+
+---
+
 ## Step 4 — Start Services (Docker paths)
 
 ### Step 4a — ECR login (Docker local)
@@ -1599,6 +1721,56 @@ EOF
     echo "✅ StorageClass iap-ebs-gp3 created"
 fi
 ```
+
+---
+
+### Step 5c.5 — Final Consolidated Confirmation (All Components)
+
+**This is the last checkpoint before any application workload (Platform, MongoDB, Redis, Gateway) is deployed.** By this point every component's method and sizing is known — the EKS cluster (Step 2.k8s.1), MongoDB (Step 2.k8s.2), and Redis (Step 2.k8s.3) each already had their own confirmation if newly provisioned. This step aggregates everything into one final summary before the first Helm install runs.
+
+Compute Platform/Gateway pod resource requests from grade (same values Step 5d's Helm values file will use):
+
+```python
+if K8S_CLUSTER_GRADE == "production":
+    platform_req, platform_lim = ("4 vCPU / 8 GB", "16 vCPU / 32 GB")
+else:
+    platform_req, platform_lim = ("2 vCPU / 4 GB", "4 vCPU / 16 GB")
+```
+
+```
+══════════════════════════════════════════════════════════════════════
+  FINAL CONFIRMATION — Full Environment Before Deployment
+══════════════════════════════════════════════════════════════════════
+  Method:  Kubernetes (Helm charts) — grade: {K8S_CLUSTER_GRADE}
+
+  ┌─────────────┬──────────────────────────────────┬──────────────────┐
+  │ Component   │ Method                            │ CPU / Memory     │
+  ├─────────────┼──────────────────────────────────┼──────────────────┤
+  │ EKS nodes   │ {existing cluster | new eksctl}   │ {vCPU}×{count} vCPU /│
+  │             │                                    │ {RAM}×{count} GB │
+  │ MongoDB     │ {Atlas|DocumentDB(new)|on-prem}   │ {instance class + │
+  │             │                                    │ vCPU/RAM, or      │
+  │             │                                    │ "external — not   │
+  │             │                                    │ managed here"}    │
+  │ Redis       │ {ElastiCache(new)|existing}        │ {same pattern}    │
+  │ Platform    │ Helm — {replicaCount} replica(s)  │ requests {platform_req}│
+  │             │                                    │ limits  {platform_lim}│
+  │ Gateway     │ {none|IAG4|IAG5} via Helm         │ {resource requests │
+  │             │                                    │ if enabled}        │
+  │ Adapter PV  │ {pv|layered|n/a}                   │ {K8S_ADAPTER_PV_SIZE}│
+  └─────────────┴──────────────────────────────────┴──────────────────┘
+
+  Ongoing AWS cost drivers: EKS cluster + nodes, MongoDB (if provisioned),
+  Redis (if provisioned) — all continue billing until explicitly torn
+  down (Step 6).
+
+Proceed with deploying Platform/Gateway now? [yes / abort]:
+══════════════════════════════════════════════════════════════════════
+```
+
+**Do not proceed to Step 5d without an explicit "yes" to this exact prompt** — the per-component confirmations earlier in Step 2 covered infrastructure creation individually; this is the one place the engineer sees (and approves) the whole picture at once before the application itself goes live.
+
+---
 
 ### Step 5d — Helm Install: IAP Platform
 
@@ -2129,15 +2301,26 @@ fi
 
 | Path | Steps | Time estimate |
 |---|---|---|
-| Docker local | 0 → 1 → 1e → 2 → 3 → 4 | ~5 min |
-| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → 4 | ~10 min |
-| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4, new EC2) → 3 (Docker install) → 3 → 4 | ~15–20 min |
-| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → 5d → 5e → 5f | ~20–30 min |
-| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 (provision) → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a–5f | ~35–45 min (15-20 for EKS) |
+| Docker local | 0 → 1 → 1e → 2 → 3 → **3d (confirm)** → 4 | ~5 min |
+| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → **3d (confirm)** → 4 | ~10 min |
+| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4 **[confirm w/ vCPU:RAM]**, new EC2) → 3 (Docker install) → 3 → **3d (confirm)** → 4 | ~15–20 min |
+| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → **5c.5 (confirm)** → 5d → 5e → 5f | ~20–30 min |
+| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 **[confirm w/ vCPU:RAM]** → 2.k8s.2 **[confirm if new]** → 2.k8s.3 **[confirm if new]** → 2.k8s.4 → 5a–5c → **5c.5 (confirm)** → 5d–5f | ~35–45 min (15-20 for EKS) |
 | K8s — new EKS cluster (prod) | same as above | ~40–50 min |
 | K8s + ingress | …5f → 5g | +5–10 min (ALB provisioning) |
 | K8s + adapter PV | …5f → 5h (option 1) | +5 min |
 | Any path reusing an existing DB (Step 1e confirmed) | skips 2.k8s.2/2.k8s.3 or dev-stack's bundled Mongo/Redis | −5–10 min |
+
+**Confirmation gates that show method + CPU/memory before creating anything billable:**
+
+| Gate | Fires when | Shows |
+|---|---|---|
+| Step 2.vm.3 | Docker on new EC2 | Instance type, vCPU/RAM |
+| Step 2.k8s.1 | New EKS cluster | Node type, per-node + total vCPU/RAM |
+| Step 2.k8s.2 choice 4 | New DocumentDB | Instance class, vCPU/RAM, instance count |
+| Step 2.k8s.3 choice 3 | New ElastiCache | Node type, vCPU/RAM |
+| Step 3d | Any Docker path, before `make setup`/`make up` | Method, per-container limits (or "unconstrained — shares host pool") |
+| Step 5c.5 | Any K8s path, before first Helm install | Full table — every component's method + CPU/RAM in one place |
 
 **EKS node sizing (from docs.itential.com):**
 

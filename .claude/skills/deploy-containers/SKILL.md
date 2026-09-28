@@ -153,6 +153,111 @@ Print: `✅ ECR login successful — {ECR_REGISTRY}`
 
 ---
 
+## Step 1e — Check for Reusable MongoDB / Redis Dependencies
+
+**Purpose:** avoid silently pointing a new deployment at a MongoDB/Redis instance that isn't network-reachable from it, and avoid spinning up (and paying for) duplicate infrastructure when a compatible instance already exists.
+
+This step runs for every `DEPLOY_TYPE` — the previous environment might be any of the three, and the new one might be any of the three.
+
+### Step 1e.1 — Detect existing dependencies
+
+Scan for evidence of a MongoDB/Redis instance already in use by a prior `/deploy-containers` (or Themis) session:
+
+```bash
+echo "=== Scanning for existing reproduction dependencies ==="
+
+# 1. Prior repro .env files (any ticket)
+find repro -maxdepth 2 -name ".env" 2>/dev/null | while read -r f; do
+    grep -qE '^(MONGO_URL|REDIS_HOST)=' "$f" && echo "Found: $f"
+done
+
+# 2. environments/*.env and project-root .env*
+for f in environments/*.env .env .env.*; do
+    [ -f "$f" ] && grep -qE '^(MONGO_URL|REDIS_HOST)=' "$f" 2>/dev/null && echo "Found: $f"
+done
+
+# 3. A currently running Docker Compose dev-stack (local or previously deployed to a VM you're re-checking)
+DEVSTACK_DIR="${DEVSTACK_DIR:-$HOME/itential-dev-stack}"
+if [ -d "$DEVSTACK_DIR" ]; then
+    (cd "$DEVSTACK_DIR" && docker compose ps --format json 2>/dev/null) | \
+        python3 -c "
+import sys, json
+for line in sys.stdin:
+    try:
+        s = json.loads(line)
+        if 'mongo' in s.get('Service','').lower() or 'redis' in s.get('Service','').lower():
+            print(f\"Running: {s['Service']} — {s.get('Status','?')} — ports: {s.get('Publishers','?')}\")
+    except Exception:
+        pass
+"
+fi
+
+# 4. An existing K8s secret (if a cluster context is already configured)
+if kubectl cluster-info > /dev/null 2>&1; then
+    for ns in $(kubectl get namespaces -o name 2>/dev/null | sed 's|namespace/||'); do
+        kubectl get secret itential-platform-secrets -n "$ns" > /dev/null 2>&1 && \
+            echo "Found: K8s secret itential-platform-secrets in namespace $ns"
+    done
+fi
+```
+
+### Step 1e.2 — Reachability judgment
+
+If nothing is found, skip straight to Step 2. If one or more sources are found, classify each against the **new** `DEPLOY_TYPE` being requested using this matrix:
+
+| Existing source | New DEPLOY_TYPE | Reachable? | Default action |
+|---|---|---|---|
+| Docker local (bound to `127.0.0.1`) | Kubernetes (EKS) | ❌ No — container loopback network, not routable from EKS pod network | Provision new — do not offer reuse |
+| Docker local (bound to `127.0.0.1`) | Docker on VM | ❌ No — different host entirely | Provision new — do not offer reuse |
+| Docker on VM (bound to VM's IP) | Kubernetes (EKS) | ⚠️ Maybe — only if the VM sits in a network reachable from the EKS VPC/nodes and its SG allows the Mongo/Redis ports from the cluster's node/pod CIDR | Ask engineer to confirm the network path; default to provisioning new unless confirmed |
+| Docker on VM (bound to VM's IP) | Docker local | ⚠️ Maybe — only if the VM is reachable from this machine and its SG allows the ports from your IP | Ask engineer to confirm |
+| Kubernetes external (Atlas / DocumentDB / ElastiCache) | Docker local or Docker on VM | ✅ Usually yes — these are standalone network endpoints, not container-local | Offer reuse; still confirm SG/firewall allows the new host's IP |
+| Same `DEPLOY_TYPE`, same ticket, already configured this session | Same `DEPLOY_TYPE` | ✅ Yes | Reuse by default — skip re-provisioning silently, just confirm briefly |
+
+### Step 1e.3 — Prompt the engineer
+
+For any ⚠️ or ✅ match, show the specifics and require an explicit choice — never assume reuse or assume re-provisioning silently when a prior instance exists.
+
+```
+⚠️  Existing dependency detected
+
+A prior reproduction session ({SOURCE_DEPLOY_TYPE}, started {date/ticket if known}) is using:
+  MongoDB: {detected MONGO_URL, host:port only — no credentials shown}
+  Redis:   {detected REDIS_HOST}:{REDIS_PORT}
+
+You're now setting up: {NEW_DEPLOY_TYPE}
+
+{reachability warning from the matrix above, filled in for this specific pairing}
+
+Options:
+  1) Provision new MongoDB/Redis for this environment (recommended when reachability is ❌ or unconfirmed)
+  2) Reuse the existing instance — I've confirmed network reachability myself
+  3) Let me answer MongoDB/Redis configuration manually
+
+Choice [1/2/3]:
+```
+
+**On choice 1:** proceed to the normal per-`DEPLOY_TYPE` provisioning path (Step 2.k8s.2/2.k8s.3 for K8s; dev-stack's own bundled containers for Docker).
+
+**On choice 2:** before trusting it, run a lightweight reachability probe rather than taking the engineer's word alone:
+```bash
+# From the new deployment's vantage point (e.g. inside a temporary debug pod for K8s,
+# or the target VM via SSH for docker-vm, or directly for docker-local)
+timeout 5 bash -c "cat < /dev/null > /dev/tcp/${MONGO_HOST}/${MONGO_PORT:-27017}" \
+    && echo "✅ MongoDB port reachable" || echo "❌ MongoDB port NOT reachable — reconsider"
+timeout 5 bash -c "cat < /dev/null > /dev/tcp/${REDIS_HOST}/${REDIS_PORT:-6379}" \
+    && echo "✅ Redis port reachable" || echo "❌ Redis port NOT reachable — reconsider"
+```
+For K8s specifically, run this probe from inside a throwaway pod on the target cluster (`kubectl run repro-netcheck --rm -it --image=busybox --restart=Never -- sh`), since reachability from your local machine does not prove reachability from the cluster's pod network. If the probe fails, warn clearly and re-offer the choice — do not silently fall through to provisioning new without telling the engineer why their reuse attempt failed.
+
+On confirmed reachability: set `MONGO_URL` / `REDIS_HOST` / `REDIS_PORT` / passwords from the detected values and skip the corresponding provisioning steps (2.k8s.2/2.k8s.3 for K8s).
+
+**On choice 3:** proceed to the normal manual configuration steps, ignoring the detected instance.
+
+**Special case — Docker local/VM reusing a K8s-external database:** the dev-stack's Docker Compose file bundles its own MongoDB/Redis containers by default. Before offering reuse of an external Atlas/DocumentDB/ElastiCache instance here, check `${DEVSTACK_DIR}/.env.example` for `MONGO_URL` / `REDIS_HOST` override variables — if the dev-stack compose file doesn't support pointing at an external database, reuse isn't possible regardless of network reachability, and the skill should say so rather than attempting an unsupported override.
+
+---
+
 ## Step 2 — Prerequisite Check
 
 Run the checks appropriate to `DEPLOY_TYPE` and print a preflight table.
@@ -495,7 +600,7 @@ fi
 kubectl cluster-info 2>/dev/null && CLUSTER_EXISTS=true || CLUSTER_EXISTS=false
 ```
 
-**If `CLUSTER_EXISTS=true`:** Print cluster info and proceed to Step 2.k8s.2.
+**If `CLUSTER_EXISTS=true`:** Print cluster info and proceed to Step 2.k8s.2. This also covers a pre-existing local `kind` cluster (`kubectl config current-context` showing `kind-<name>`) — the rest of this skill (Helm installs, secrets, probes) applies identically to `kind` as to EKS; only image-pull mechanics differ (see the arm64 gotcha below).
 
 **If `CLUSTER_EXISTS=false`:** Offer EKS provisioning:
 
@@ -504,10 +609,18 @@ No cluster is reachable (check KUBECONFIG / VPN, or K8S_CONTEXT in .env).
 
 Options:
   1) Provision a new AWS EKS cluster  (uses the AWS profile from Step 1)
-  2) Connect to an existing cluster   (I'll wait while you run aws eks update-kubeconfig)
+  2) Connect to an existing cluster   (I'll wait while you run aws eks update-kubeconfig,
+                                        or switch context to an existing local `kind` cluster)
 
 Choice [1/2]:
 ```
+
+**Gotcha — Apple Silicon (arm64) `kind` nodes cannot pull amd64-only images the normal way.** Unlike `docker run`, which transparently emulates amd64 via QEMU, containerd inside a `kind` node performs strict CRI platform matching and will fail (or silently pick the wrong manifest) when pulling an amd64-only image like the IAG5 image (`automation-gateway5:5.5.2-amd64`) on an arm64 node. Fix: pull the image on the host first (where Docker Desktop's emulation works), then side-load it directly into the `kind` node's containerd, bypassing the platform-matched registry pull:
+```bash
+docker pull --platform=linux/amd64 497639811223.dkr.ecr.us-east-2.amazonaws.com/automation-gateway5:5.5.2-amd64
+kind load docker-image 497639811223.dkr.ecr.us-east-2.amazonaws.com/automation-gateway5:5.5.2-amd64 --name <kind-cluster-name>
+```
+Apply this whenever `kubectl describe pod` shows `ErrImagePull`/`ImagePullBackOff` on an amd64-tagged image on a local `kind` cluster on Apple Silicon.
 
 **If choice 2:** Pause and show:
 ```bash
@@ -718,6 +831,8 @@ port-forward access to IAP without an ingress controller.
 
 #### Step 2.k8s.2 — MongoDB Configuration
 
+*Skip this step if Step 1e already resolved MongoDB via confirmed reuse of an existing instance.*
+
 The Itential Helm charts do NOT include MongoDB — an external instance is required.
 
 ```
@@ -772,6 +887,8 @@ ITENTIAL_MONGO_PASSWORD=...
 ---
 
 #### Step 2.k8s.3 — Redis Configuration
+
+*Skip this step if Step 1e already resolved Redis via confirmed reuse of an existing instance.*
 
 The Itential Helm charts do NOT include Redis — an external instance is required.
 
@@ -1013,6 +1130,16 @@ kubectl get storageclass iap-ebs-gp3 > /dev/null 2>&1 \
   && echo "✅ StorageClass iap-ebs-gp3 exists" \
   || echo "⚠️  StorageClass iap-ebs-gp3 not found — Step 5c will create it"
 ```
+
+**Gotcha — install cert-manager cluster-wide, never as a per-chart subchart dependency.** Setting `certManager.enabled: true` inside the `iap`/`iag5` Helm values causes a chicken-and-egg problem: the chart's `--dry-run` (and often the real install) needs cert-manager's CRDs (`Issuer`, `ClusterIssuer`, `Certificate`) to already exist. Always install cert-manager once, cluster-wide (block below), then set `certManager.enabled: false` in every chart's values file — the chart still creates its own `Issuer`/`Certificate` objects, it just doesn't try to install the controller itself.
+
+**Gotcha — `ClusterIssuer` vs namespaced `Issuer` resolve their CA secret in different namespaces.** A `ClusterIssuer`'s `ca.secretName` is looked up in the **cert-manager controller's own namespace** (`cert-manager`), regardless of which namespace the issuer "belongs" to. A namespaced `Issuer`'s `ca.secretName` is looked up in its own namespace. The `iap` chart defaults `issuer.kind: ClusterIssuer`; the `iag5` chart defaults `issuer.kind: Issuer`. If both charts share one CA secret, that secret must exist in **both** the app namespace (for the `Issuer`) **and** the `cert-manager` namespace (for the `ClusterIssuer`) — copy it explicitly:
+```bash
+kubectl get secret iap-ca-secret -n "${NAMESPACE}" -o yaml \
+  | sed "s/namespace: ${NAMESPACE}/namespace: cert-manager/" \
+  | kubectl apply -f -
+```
+A `Certificate` stuck in `Ready: False` with no obvious error is the symptom — check `kubectl describe certificate <name> -n <ns>` and confirm the referenced CA secret actually exists in the namespace the issuer kind expects.
 
 **Install missing components (if warranted):**
 
@@ -1425,12 +1552,12 @@ kubectl create secret generic itential-platform-secrets \
 echo "✅ itential-platform-secrets applied"
 ```
 
-**For IAG5** — also create `itential-gateway-secrets`:
+**For IAG5** — also create `itential-gateway-secrets`. **Key name must be `gatewayEncryptionKey`** (confirmed against the `iag5` chart's `deployment-server.yaml`/`deployment-runner.yaml` `subPath` reference — `encryptionKey` is silently wrong and produces no error, just a missing key at mount time):
 ```bash
 GATEWAY_ENC_KEY=$(openssl rand -hex 32)
 kubectl create secret generic itential-gateway-secrets \
     --namespace="${NAMESPACE}" \
-    --from-literal=encryptionKey="${GATEWAY_ENC_KEY}" \
+    --from-literal=gatewayEncryptionKey="${GATEWAY_ENC_KEY}" \
     --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -1475,6 +1602,23 @@ fi
 
 ### Step 5d — Helm Install: IAP Platform
 
+**Before writing any values file — verify the chart's real schema.** Helm silently drops unknown keys in `--values` files: it does not error, does not warn, and the release still installs "successfully" while the intended override has zero effect. Never author a values file from memory or assumption. Always confirm first:
+
+```bash
+helm show values iap/iap > /tmp/iap-default-values.yaml
+helm pull iap/iap --untar --untardir /tmp/iap-chart-inspect
+grep -rn '\.Values\.' /tmp/iap-chart-inspect/iap/templates/ | less
+```
+
+Cross-check every key you're about to set against `/tmp/iap-default-values.yaml` and the template `grep` output before writing `/tmp/iap-values.yaml` below. The real `iap` chart schema uses `storageClass: {enabled, name}` (not `persistence.storageClassName`) and a flat `env:` map for Mongo/Redis connection settings (not nested `mongodb:`/`redis:` blocks) — those nested blocks do not exist in the chart and were a documentation error in earlier versions of this skill.
+
+**Before running `helm upgrade --install`, check for a stale `pending-install` release from a prior interrupted session.** `helm upgrade --install --atomic --timeout` only rolls back/uninstalls on failure if the controlling Helm client process is still alive to observe the timeout. If that process was killed (session restart, terminal closed, agent context reset) mid-install, the release is left stuck in `pending-install` indefinitely — nothing will ever trigger its own cleanup, and a fresh `helm upgrade --install` against it will error or produce confusing partial-state behavior. Check and clear it first:
+```bash
+helm list -n "${NAMESPACE}" -a | grep -i pending
+# If a stale pending-install (or pending-upgrade) release is found for iap/iag5:
+helm uninstall iap -n "${NAMESPACE}"    # or iag5 — match the release name found above
+```
+
 Determine replica count from cluster grade:
 - Minimum (dev/test): `replicaCount=1`
 - Production: `replicaCount=2` (one pod per node, separate AZs — StatefulSet distributes automatically)
@@ -1512,20 +1656,55 @@ resources:
     cpu: "$([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '16' || echo '4')"
     memory: "$([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '32Gi' || echo '16Gi')"
 
-# StorageClass for platform data volumes
-persistence:
-  storageClassName: iap-ebs-gp3
+# StorageClass for platform data volumes — real chart key is storageClass.name, NOT persistence.storageClassName
+storageClass:
+  enabled: true
+  name: iap-ebs-gp3
 
-# External MongoDB (required — charts do not install MongoDB)
-mongodb:
-  external: true
-  url: "${MONGO_URL}"
+# IAP mounts a PVC for /var/log/itential and for /opt/itential/platform/services/custom
+# (adapters/apps) — but the StatefulSet template only wires the volumeMount in when these
+# flags are true. They default to false. Skipping this silently produces PVCs that exist
+# but are never mounted, and app-level errors like "/var/log/itential is not a writable
+# location" that give no hint the fix is a values.yaml flag.
+mountLogVolume: true
+mountAdapterVolume: true
 
-# External Redis (required — charts do not install Redis)
-redis:
-  external: true
-  host: "${REDIS_HOST}"
-  port: ${REDIS_PORT:-6379}
+# Mongo/Redis connection settings — flat env map, NOT nested mongodb:/redis: blocks
+# (those keys do not exist in the chart and are silently ignored if used)
+env:
+  ITENTIAL_MONGO_URL: "${MONGO_URL}"
+  ITENTIAL_MONGO_AUTH_ENABLED: "${ITENTIAL_MONGO_AUTH_ENABLED:-true}"
+  ITENTIAL_MONGO_TLS_ENABLED: "${ITENTIAL_MONGO_TLS_ENABLED:-false}"
+  ITENTIAL_REDIS_HOST: "${REDIS_HOST}"
+  ITENTIAL_REDIS_PORT: "${REDIS_PORT:-6379}"
+  # If Redis has no auth configured, this MUST be set to an empty string — the chart
+  # defaults ITENTIAL_REDIS_USERNAME to "itential", which makes the platform attempt an
+  # AUTH against a Redis server with no requirepass set, and fails with a generic
+  # "Unable to connect to Redis. Please verify authentication properties are valid" error
+  # that gives no indication the real cause is an unwanted AUTH attempt.
+  ITENTIAL_REDIS_USERNAME: "${ITENTIAL_REDIS_USERNAME:-}"
+
+# Startup/liveness/readiness probe tuning — IAP boots ~40 sequential named services
+# (Tags, WorkFlowEngine, JsonForms, MOP, Search, GatewayManager, InventoryManager, etc.).
+# The chart default startupProbe budget (failureThreshold 3 * periodSeconds 30 ≈ 270s) is
+# frequently too short on constrained/local nodes (kind, small EC2, laptop Docker Desktop),
+# causing the container to be killed mid-boot. Raise failureThreshold for minimum-grade /
+# local clusters. Note: livenessProbe is an exec `pgrep` chain against named Pronghorn
+# processes, NOT an HTTP check — the chart's livenessProbe.path key has no effect on it;
+# only initialDelaySeconds/periodSeconds/timeoutSeconds/failureThreshold matter.
+startupProbe:
+  enabled: true
+  failureThreshold: $([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '5' || echo '20')
+
+livenessProbe:
+  enabled: true
+  timeoutSeconds: $([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '10' || echo '30')
+  failureThreshold: $([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '3' || echo '10')
+
+readinessProbe:
+  enabled: true
+  timeoutSeconds: $([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '10' || echo '30')
+  failureThreshold: $([ "${K8S_CLUSTER_GRADE}" = "production" ] && echo '3' || echo '10')
 
 # Ingress
 ingress:
@@ -1598,18 +1777,96 @@ Set `ACM_CERT_ARN` and re-run the Helm upgrade.
 ### Step 5e — Helm Install: IAG (if needed)
 
 **IAG5:**
+
+Same rule as Step 5d — verify the chart's real schema before writing values, don't rely on `--set` chains for anything beyond the trivial image override:
+```bash
+helm show values iag5/iag5 > /tmp/iag5-default-values.yaml
+helm pull iag5/iag5 --untar --untardir /tmp/iag5-chart-inspect
+grep -rn '\.Values\.' /tmp/iag5-chart-inspect/iag5/templates/ | less
+```
+
+Bare `--set` flags for image/pull-secret alone are not sufficient — IAG5 also needs etcd disabled (unless a real etcd cluster is provisioned), cert-manager disabled at the chart level (cluster-wide cert-manager handles it, per the Step 2.k8s gotcha above), a namespaced `Issuer` + `Certificate` block (the `iag5` chart defaults `issuer.kind: Issuer`, not `ClusterIssuer` — see the CA-secret-namespace gotcha above), and `serverSettings` pointed at the IAP service so it can register:
+
 ```bash
 helm repo add iag5 https://itential.github.io/iag5-helm 2>/dev/null || true
 helm repo update iag5
 
+cat > /tmp/iag5-values.yaml <<EOF
+hostname: ${IAG5_HOSTNAME:-iag5.itential.local}
+port: 50051
+useTLS: true
+
+etcd:
+  enabled: false
+
+certManager:
+  enabled: false
+
+image:
+  repository: 497639811223.dkr.ecr.us-east-2.amazonaws.com/automation-gateway5
+  tag: "${GATEWAY5_VERSION}"
+  pullPolicy: "IfNotPresent"
+
+imagePullSecrets:
+  - name: ecr-pull-secret
+
+service:
+  type: ClusterIP
+
+issuer:
+  kind: Issuer
+  enabled: true
+  name: iag5-ca-issuer
+  caSecretName: iap-ca-secret
+
+certificate:
+  enabled: true
+  issuerRef:
+    name: iag5-ca-issuer
+    kind: Issuer
+  renewBefore: 48h
+  duration: 2160h
+  dnsNames:
+    - ${IAG5_HOSTNAME:-iag5.itential.local}
+    - iag5-service.${NAMESPACE}.svc.cluster.local
+
+resources:
+  enabled: true
+
+runnerSettings:
+  replicaCount: 0
+
+serverSettings:
+  replicaCount: 1
+  connectEnabled: true
+  connectHosts: "iap-service.${NAMESPACE}.svc.cluster.local:8080"
+  connectInsecureEnabled: ${IAG5_CONNECT_INSECURE:-true}
+
+applicationSettings:
+  clusterId: ${IAG5_CLUSTER_ID:-cluster_1}
+  logLevel: ${IAG5_LOG_LEVEL:-INFO}
+  storeBackend: memory
+EOF
+
+echo "=== Helm values written to /tmp/iag5-values.yaml — review before applying ==="
+cat /tmp/iag5-values.yaml
+
 helm upgrade --install iag5 iag5/iag5 \
     --namespace="${NAMESPACE}" \
-    --set "image.repository=497639811223.dkr.ecr.us-east-2.amazonaws.com/automation-gateway5" \
-    --set "image.tag=${GATEWAY5_VERSION}" \
-    --set "imagePullSecrets[0].name=ecr-pull-secret" \
-    --dry-run
+    --values /tmp/iag5-values.yaml \
+    --dry-run 2>&1 | head -100
 echo "Apply IAG5 Helm release? [yes / skip]:"
 ```
+
+On approval, run without `--dry-run`:
+```bash
+helm upgrade --install iag5 iag5/iag5 \
+    --namespace="${NAMESPACE}" \
+    --values /tmp/iag5-values.yaml
+echo "✅ IAG5 Helm release deployed"
+```
+
+**Post-install pairing (required before the IAG5-to-IAP WebSocket handshake succeeds):** IAG5 connecting to IAP's Gateway Manager is not just a network/TLS matter — IAP validates the incoming client certificate against a `GATEWAYS` collection record in MongoDB, looked up by `clusterId`. Until this gateway is registered in IAP (via the IAP UI's Gateway Manager section, or its API), the connection will fail with a WebSocket close `1002 (protocol error): Uncaught error while executing validateCertificate` — this is expected for a freshly deployed, unregistered gateway, not a values.yaml or networking defect. Register the gateway (matching `applicationSettings.clusterId` above) before expecting IAG5 to show as connected.
 
 **IAG4** (requires node labeling first):
 ```bash
@@ -1872,14 +2129,15 @@ fi
 
 | Path | Steps | Time estimate |
 |---|---|---|
-| Docker local | 0 → 1 → 2 → 3 → 4 | ~5 min |
-| Docker on existing VM | 0 → 1 → 2 (existing) → 3 → 4 | ~10 min |
-| Docker on new EC2 | 0 → 1 → 2 (2.vm.1–2.vm.4, new EC2) → 3 (Docker install) → 3 → 4 | ~15–20 min |
-| K8s — existing cluster | 0 → 1 → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → 5d → 5e → 5f | ~20–30 min |
-| K8s — new EKS cluster (min) | 0 → 1 → 2.k8s.0 → 2.k8s.1 (provision) → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a–5f | ~35–45 min (15-20 for EKS) |
+| Docker local | 0 → 1 → 1e → 2 → 3 → 4 | ~5 min |
+| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → 4 | ~10 min |
+| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4, new EC2) → 3 (Docker install) → 3 → 4 | ~15–20 min |
+| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → 5d → 5e → 5f | ~20–30 min |
+| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 (provision) → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a–5f | ~35–45 min (15-20 for EKS) |
 | K8s — new EKS cluster (prod) | same as above | ~40–50 min |
 | K8s + ingress | …5f → 5g | +5–10 min (ALB provisioning) |
 | K8s + adapter PV | …5f → 5h (option 1) | +5 min |
+| Any path reusing an existing DB (Step 1e confirmed) | skips 2.k8s.2/2.k8s.3 or dev-stack's bundled Mongo/Redis | −5–10 min |
 
 **EKS node sizing (from docs.itential.com):**
 

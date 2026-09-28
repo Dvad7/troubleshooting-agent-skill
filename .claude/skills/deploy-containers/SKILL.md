@@ -1540,21 +1540,59 @@ curl -sk https://localhost:3443/health/platform | python3 -m json.tool 2>/dev/nu
   || curl -sk http://localhost:3000/health/platform
 ```
 
-Print status table:
+### Step 4e — Post-Build Component Summary
+
+**Detect the actual running versions — never assume the requested tag was what actually started.** Image tags can resolve to a different patch version (`6` rolling tags, cached layers), and MongoDB/Redis versions are set by the dev-stack's own compose file, not by anything this skill controls directly.
+
+```bash
+DC_EXEC="docker compose exec -T"
+[ "${DEPLOY_TYPE}" = "docker-vm" ] && DC_EXEC="ssh -i ${SSH_KEY} ${SSH_USER}@${SSH_HOST} cd ~/itential-dev-stack && docker compose exec -T"
+
+# Platform — actual version from the health endpoint (falls back to requested tag if the field is absent)
+PLATFORM_VERSION_ACTUAL=$(curl -sk https://localhost:3443/health/platform 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('version') or d.get('platformVersion') or '${IAP_VERSION} (requested — actual not reported by endpoint)')" 2>/dev/null \
+    || echo "${IAP_VERSION} (requested — health endpoint unreachable)")
+
+# MongoDB — actual server version
+MONGO_VERSION_ACTUAL=$(${DC_EXEC} mongo mongosh --quiet --eval "db.version()" 2>/dev/null \
+    || ${DC_EXEC} mongo mongo --quiet --eval "db.version()" 2>/dev/null \
+    || echo "unknown — exec into the mongo container to check")
+
+# Redis — actual server version
+REDIS_VERSION_ACTUAL=$(${DC_EXEC} redis redis-cli INFO server 2>/dev/null \
+    | grep "redis_version:" | cut -d: -f2 | tr -d '\r' \
+    || echo "unknown — exec into the redis container to check")
+
+# Gateway — actual version (if enabled)
+if [ "${GATEWAY5_ENABLED}" = "true" ]; then
+    GATEWAY_VERSION_ACTUAL=$(${DC_EXEC} gateway5 cat /opt/automation-gateway/VERSION 2>/dev/null || echo "${GATEWAY5_VERSION} (requested)")
+elif [ "${GATEWAY4_ENABLED}" = "true" ]; then
+    GATEWAY_VERSION_ACTUAL=$(${DC_EXEC} gateway4 python3 -c "import automation_gateway; print(automation_gateway.__version__)" 2>/dev/null || echo "${GATEWAY4_VERSION} (requested)")
+fi
+```
+
+Print the full build summary:
 
 ```
-╔════════════════════════════════════════════════════════╗
-║  Reproduction Environment Ready                        ║
-╠═══════════════╦══════════════╦══════════════════════════╣
-║ Service       ║ Status       ║ Access                   ║
-╠═══════════════╬══════════════╬══════════════════════════╣
-║ Platform      ║ ✅ healthy   ║ https://localhost:3443   ║
-║ MongoDB       ║ ✅ healthy   ║ localhost:27017           ║
-║ Redis         ║ ✅ healthy   ║ localhost:6379           ║
-╠═══════════════╬══════════════╬══════════════════════════╣
-║ Default creds ║ admin@itential.com / admin             ║
-╚═══════════════╩══════════════╧══════════════════════════╝
+╔════════════════════════════════════════════════════════════════════╗
+║  ENVIRONMENT BUILD SUMMARY — Docker ({docker-local | docker-vm})   ║
+╠════════════════════════════════════════════════════════════════════╣
+║  Method:          {Docker Compose — this machine | on {SSH_HOST}} ║
+║  Started:         {timestamp}                                     ║
+╠═══════════════╦═══════════════════════╦════════════════════════════╣
+║ Component     ║ Version               ║ Access                     ║
+╠═══════════════╬═══════════════════════╬════════════════════════════╣
+║ Platform      ║ {PLATFORM_VERSION_ACTUAL} ║ https://localhost:3443 ║
+║ MongoDB       ║ {MONGO_VERSION_ACTUAL}    ║ localhost:27017         ║
+║ Redis         ║ {REDIS_VERSION_ACTUAL}    ║ localhost:6379          ║
+║ Gateway       ║ {GATEWAY_VERSION_ACTUAL or "not deployed"} ║ {gateway URL if enabled} ║
+╠═══════════════╩═══════════════════════╩════════════════════════════╣
+║ Default creds:  admin@itential.com / admin                         ║
+║ Env file:       repro/{ISD_TICKET_KEY}/.env                        ║
+╚════════════════════════════════════════════════════════════════════╝
 ```
+
+**If any version shows "unknown" or a container name mismatch error**, check the dev-stack's actual service names (`docker compose config --services`) — they may differ across dev-stack versions.
 
 Create `repro/{ISD_TICKET_KEY}/.env` with the dev stack connection details so the orchestrator and sub-skills can use this environment:
 
@@ -2113,6 +2151,70 @@ kill $PF_PID 2>/dev/null
    https://{K8S_HOSTNAME}
    ```
 
+### Step 5f.5 — Post-Build Component Summary
+
+**Detect actual versions — never rely solely on what was requested.** The Helm chart tag, the DocumentDB/ElastiCache engine version chosen at provisioning, and Atlas/on-prem endpoints supplied by the engineer can all differ from what actually ends up running.
+
+```bash
+# Cluster
+K8S_VERSION_ACTUAL=$(kubectl version -o json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('serverVersion',{}).get('gitVersion','unknown'))")
+NODE_COUNT_ACTUAL=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+
+# Platform — actual image tag from the running pod (Helm values can drift from what was requested if --reuse-values was used)
+PLATFORM_VERSION_ACTUAL=$(kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=iap -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null | awk -F: '{print $NF}')
+
+# MongoDB — actual server version (throwaway pod probe; works for Atlas/DocumentDB/on-prem alike)
+MONGO_VERSION_ACTUAL=$(kubectl run mongo-version-check --rm -i --restart=Never --image=mongo:7 -n "${NAMESPACE}" \
+    --command -- mongosh "${MONGO_URL}" --quiet --eval "db.version()" 2>/dev/null \
+    || echo "unknown — probe pod could not reach ${MONGO_URL%%@*}@...")
+
+# Redis — actual server version (throwaway pod probe)
+REDIS_VERSION_ACTUAL=$(kubectl run redis-version-check --rm -i --restart=Never --image=redis:7 -n "${NAMESPACE}" \
+    --command -- redis-cli -h "${REDIS_HOST}" -p "${REDIS_PORT:-6379}" INFO server 2>/dev/null \
+    | grep "redis_version:" | cut -d: -f2 | tr -d '\r' \
+    || echo "unknown — probe pod could not reach ${REDIS_HOST}")
+
+# Gateway — actual image tag (if deployed)
+if helm status iag5 -n "${NAMESPACE}" > /dev/null 2>&1; then
+    GATEWAY_VERSION_ACTUAL=$(kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=iag5 -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null | awk -F: '{print $NF}')
+    GATEWAY_LABEL="IAG5"
+elif helm status iag4 -n "${NAMESPACE}" > /dev/null 2>&1; then
+    GATEWAY_VERSION_ACTUAL=$(kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=iag4 -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null | awk -F: '{print $NF}')
+    GATEWAY_LABEL="IAG4"
+fi
+```
+
+Print the full build summary:
+
+```
+╔══════════════════════════════════════════════════════════════════════════╗
+║  ENVIRONMENT BUILD SUMMARY — Kubernetes (EKS)                            ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  Cluster:        {EKS_CLUSTER_NAME}  ({EKS_CLUSTER_REGION})              ║
+║  K8s version:    {K8S_VERSION_ACTUAL}                                    ║
+║  Nodes:          {NODE_COUNT_ACTUAL} × {EKS_NODE_TYPE}                   ║
+║  Namespace:      {NAMESPACE}                                             ║
+║  Grade:          {K8S_CLUSTER_GRADE}                                     ║
+╠═══════════════╦═════════════════════════╦════════════════════════════════╣
+║ Component     ║ Version                 ║ Source / Access                ║
+╠═══════════════╬═════════════════════════╬════════════════════════════════╣
+║ Platform      ║ {PLATFORM_VERSION_ACTUAL} ║ Helm release "iap"            ║
+║ MongoDB       ║ {MONGO_VERSION_ACTUAL}    ║ {Atlas|DocumentDB|on-prem}    ║
+║ Redis         ║ {REDIS_VERSION_ACTUAL}    ║ {ElastiCache|existing}        ║
+║ Gateway       ║ {GATEWAY_VERSION_ACTUAL or "not deployed"} ║ {GATEWAY_LABEL or "n/a"} ║
+║ Adapter store ║ {K8S_ADAPTER_METHOD: pv (Ngi GB) | layered} ║            ║
+╠═══════════════╩═════════════════════════╩════════════════════════════════╣
+║ Access:       https://localhost:3443 (port-forward) {or K8S_HOSTNAME}    ║
+║ Credentials:  admin@itential.com / [ITENTIAL_DEFAULT_USER_PASSWORD]      ║
+║ Config saved: environments/eks/{EKS_CLUSTER_NAME}.yaml                   ║
+╚══════════════════════════════════════════════════════════════════════════╝
+```
+
+**Clean up the throwaway probe pods if `--rm` didn't fully remove them** (rare, on probe timeout):
+```bash
+kubectl delete pod mongo-version-check redis-version-check -n "${NAMESPACE}" --ignore-not-found 2>/dev/null
+```
+
 ### Step 5g — Ingress (optional — if K8S_HOSTNAME is set)
 
 *Skip if reproducing without an external hostname. Port-forward is sufficient for most repro work.*
@@ -2301,14 +2403,14 @@ fi
 
 | Path | Steps | Time estimate |
 |---|---|---|
-| Docker local | 0 → 1 → 1e → 2 → 3 → **3d (confirm)** → 4 | ~5 min |
-| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → **3d (confirm)** → 4 | ~10 min |
-| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4 **[confirm w/ vCPU:RAM]**, new EC2) → 3 (Docker install) → 3 → **3d (confirm)** → 4 | ~15–20 min |
-| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → **5c.5 (confirm)** → 5d → 5e → 5f | ~20–30 min |
-| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 **[confirm w/ vCPU:RAM]** → 2.k8s.2 **[confirm if new]** → 2.k8s.3 **[confirm if new]** → 2.k8s.4 → 5a–5c → **5c.5 (confirm)** → 5d–5f | ~35–45 min (15-20 for EKS) |
+| Docker local | 0 → 1 → 1e → 2 → 3 → **3d (confirm)** → 4 → **4e (summary)** | ~5 min |
+| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → **3d (confirm)** → 4 → **4e (summary)** | ~10 min |
+| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4 **[confirm w/ vCPU:RAM]**, new EC2) → 3 (Docker install) → 3 → **3d (confirm)** → 4 → **4e (summary)** | ~15–20 min |
+| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → **5c.5 (confirm)** → 5d → 5e → 5f → **5f.5 (summary)** | ~20–30 min |
+| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 **[confirm w/ vCPU:RAM]** → 2.k8s.2 **[confirm if new]** → 2.k8s.3 **[confirm if new]** → 2.k8s.4 → 5a–5c → **5c.5 (confirm)** → 5d–5f → **5f.5 (summary)** | ~35–45 min (15-20 for EKS) |
 | K8s — new EKS cluster (prod) | same as above | ~40–50 min |
-| K8s + ingress | …5f → 5g | +5–10 min (ALB provisioning) |
-| K8s + adapter PV | …5f → 5h (option 1) | +5 min |
+| K8s + ingress | …5f.5 → 5g | +5–10 min (ALB provisioning) |
+| K8s + adapter PV | …5f.5 → 5h (option 1) | +5 min |
 | Any path reusing an existing DB (Step 1e confirmed) | skips 2.k8s.2/2.k8s.3 or dev-stack's bundled Mongo/Redis | −5–10 min |
 
 **Confirmation gates that show method + CPU/memory before creating anything billable:**
@@ -2321,6 +2423,15 @@ fi
 | Step 2.k8s.3 choice 3 | New ElastiCache | Node type, vCPU/RAM |
 | Step 3d | Any Docker path, before `make setup`/`make up` | Method, per-container limits (or "unconstrained — shares host pool") |
 | Step 5c.5 | Any K8s path, before first Helm install | Full table — every component's method + CPU/RAM in one place |
+
+**Post-build summaries that show what was actually built (versions, not requested tags):**
+
+| Summary | Fires when | Shows |
+|---|---|---|
+| Step 4e | Any Docker path, after health check passes | Actual Platform/MongoDB/Redis/Gateway versions (queried live, not assumed from image tags) |
+| Step 5f.5 | Any K8s path, after health check passes | Cluster name/version/node count, actual Platform/MongoDB/Redis/Gateway versions (queried via pod image tags and throwaway probe pods), adapter storage method, saved config path |
+
+`/themis-aws-deploy` has the equivalent as Step 6c (`LOCAL-EXTENSIONS.md`) — a per-role host/version table sourced from `run-vars.yml` (`platform_release`/`gateway_release`) and the certify reports' actual MongoDB/Redis version lines, supplementing the vendor's own End-of-run summary.
 
 **EKS node sizing (from docs.itential.com):**
 

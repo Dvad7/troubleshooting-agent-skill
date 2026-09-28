@@ -1028,3 +1028,83 @@ Proceed with tofu apply? (yes / no / show-run-vars)
 or `--auto` flags. The engineer must type "yes" in the chat in response to this prompt.
 This confirmation is never skipped — it fires identically whether the skill was invoked
 directly or wrapped by `/deploy-containers` picking the "VMs on AWS (Themis)" option.
+
+---
+
+## [INSERT AFTER Step 6b] Step 6c — Post-Build Component Summary Table
+
+> **Run this after Step 6b (Capture Certify Reports), replacing/extending the vendor's
+> plain-text "End-of-run summary."** The vendor summary already states PASSED/FAILED per
+> component and report file locations — this step adds a structured table naming every
+> component's actual version and host, so the engineer never has to open a report file
+> just to answer "what did we actually build?"
+
+### Resolve requested versions from run-vars.yml
+
+```bash
+PLATFORM_RELEASE=$(grep -E "^platform_release:" .claude/skills/themis-aws-deploy/run-vars.yml \
+  | awk -F': ' '{print $2}' | tr -d '"' | xargs)
+GATEWAY_RELEASE=$(grep -E "^gateway_release:" .claude/skills/themis-aws-deploy/run-vars.yml \
+  | awk -F': ' '{print $2}' | tr -d '"' | xargs)
+[ -z "${PLATFORM_RELEASE}" ] && PLATFORM_RELEASE="Themis pinned default (not overridden in run-vars.yml)"
+[ -z "${GATEWAY_RELEASE}" ] && GATEWAY_RELEASE="not deployed (gateway_release unset)"
+```
+
+### Extract actual MongoDB version from certify reports
+
+```bash
+for f in <ENV_DIR>/reports/mongodb/*.md; do
+  [ -f "$f" ] || continue
+  host=$(basename "$f" | sed -E 's/mongodb-report-(.+)\.md/\1/')
+  ver=$(grep -m1 "^db version" "$f" | awk '{print $3}')
+  echo "MongoDB @ ${host}: ${ver:-unknown — inspect $f manually}"
+done
+```
+
+### Extract actual Redis version from certify reports (if the architecture has a Redis role)
+
+```bash
+for f in <ENV_DIR>/reports/redis/*.md; do
+  [ -f "$f" ] || continue
+  host=$(basename "$f" | sed -E 's/redis-report-(.+)\.md/\1/')
+  ver=$(grep -m1 -iE "redis[ _-]?version" "$f" | head -1)
+  echo "Redis @ ${host}: ${ver:-unknown — inspect $f manually, report format not yet confirmed for this field}"
+done
+```
+
+**Note:** unlike the MongoDB report's confirmed `db version vX.Y.Z` line, the exact Redis
+version line format has not been verified against a live redis-report — grep broadly
+(`-iE "redis[ _-]?version"`) and fall back to telling the engineer to open the report
+directly rather than asserting a version that might be a false match.
+
+### Resolve per-role host list from the inventory
+
+```bash
+cat <ENV_DIR>/inventory/hosts
+# Groups: [platform], [mongodb], [redis], [gateway] — extract hostname/IP per group
+```
+
+### Present the summary table
+
+```
+╔══════════════════════════════════════════════════════════════════════════╗
+║  ENVIRONMENT BUILD SUMMARY — <architecture>/<os>                        ║
+╠══════════════════════════════════════════════════════════════════════════╣
+║  AWS account:  <account-id>   Region: <region>   Owner: <owner>          ║
+║  Built:        <timestamp>                                              ║
+╠═══════════╦═══════════════════════╦═══════════════════════╦══════════════╣
+║ Role      ║ Host(s)               ║ Version               ║ Instance type║
+╠═══════════╬═══════════════════════╬═══════════════════════╬══════════════╣
+║ Platform  ║ <host1>, <host2>...   ║ <PLATFORM_RELEASE>    ║ <PLATFORM_TYPE>║
+║ MongoDB   ║ <host1>, <host2>...   ║ <extracted per host>  ║ <MONGODB_TYPE>║
+║ Redis     ║ <host1>, <host2>...   ║ <extracted per host>  ║ <REDIS_TYPE>║
+║ Gateway   ║ <host>                ║ <GATEWAY_RELEASE>     ║ <GATEWAY_TYPE>║
+╠═══════════╩═══════════════════════╩═══════════════════════╩══════════════╣
+║ Certify verdict:  <PASSED/FAILED/WARNING per component from Step 6a>     ║
+║ Reports:          <ENV_DIR>/reports/  (snapshot: <SKILL_DIR>/artifacts/...)║
+║ Destroy command:  tofu destroy -var-file=... -var owner=<owner> ...      ║
+╚══════════════════════════════════════════════════════════════════════════╝
+```
+
+This table supplements — does not replace — the vendor's own "End-of-run summary" bullet
+list (deployment state, certify verdict, report locations). Present both.

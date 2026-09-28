@@ -1988,6 +1988,7 @@ flowchart TD
         <div class="prereq-check-item"><div class="prereq-check-box"></div><span>Cost acknowledged — know how many VMs will be created and have a destroy plan ready</span></div>
       </div>
       <div class="note" style="margin-top:10px;"><strong>The Pre-Build Confirmation Gate does this checking for you</strong> — it fires automatically before every <code>tofu apply</code> (regardless of <code>--auto</code> mode) and shows a per-role CPU/Memory Allocation Breakdown table (Platform / MongoDB / Redis / Gateway — instance type, host count from the architecture's tfvars, vCPU, RAM, and a running total) before asking for the "yes" that lets provisioning proceed. This checklist is for your own mental prep; the gate is the actual enforcement.</div>
+      <div class="note" style="margin-top:10px;"><strong>After the build finishes</strong>, Step 6c (<code>LOCAL-EXTENSIONS.md</code>) presents a Post-Build Component Summary Table — per-role host list, the actual MongoDB version parsed from the certify reports' <code>db version vX.Y.Z</code> line, and the Platform/Gateway release pulled from <code>run-vars.yml</code>. This supplements (doesn't replace) the vendor skill's own End-of-run summary of certify PASS/FAIL and report file locations.</div>
     </div>
 
   </div>
@@ -4865,25 +4866,33 @@ tofu destroy \
         <div class="rule-body">Fires right before the first Helm install, once every component's method and sizing is known. Shows one consolidated table: EKS nodes (type × count → total vCPU/RAM), MongoDB (source + instance class if provisioned, or "external — not managed here"), Redis (same pattern), Platform pod requests/limits (from grade), Gateway (if enabled), and adapter PV size. Individual infra-creation confirmations earlier in Step 2 already covered EKS/Mongo/Redis creation separately — this is the one place the engineer approves the whole picture before the application itself goes live.</div>
       </div>
       <div class="rule-item">
+        <div class="rule-label">Step 4e — Post-build summary (Docker)</div>
+        <div class="rule-body">Fires after the health check passes. Queries the actual running versions rather than trusting the requested tag — <code>mongosh --eval "db.version()"</code> inside the mongo container, <code>redis-cli INFO server</code> for <code>redis_version</code>, the Platform health endpoint's reported version, and the Gateway container's version file/module (if enabled). Presents one table: component, actual version, access URL, plus the default credentials and the <code>repro/&#123;TICKET&#125;/.env</code> path.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Step 5f.5 — Post-build summary (K8s)</div>
+        <div class="rule-body">Fires after the health check passes. Shows cluster name/region/K8s version/node count, then actual component versions: Platform's image tag read directly off the running pod (not the Helm values, which can drift with <code>--reuse-values</code>), MongoDB/Redis versions queried via a throwaway <code>kubectl run</code> probe pod against whatever endpoint is configured (Atlas, DocumentDB, ElastiCache, or on-prem — works the same way regardless of source), and Gateway's image tag if IAG4/IAG5 is deployed. Also states the adapter storage method and the saved <code>environments/eks/&#123;name&#125;.yaml</code> path. Probe pods self-delete via <code>--rm</code>; a cleanup command is provided in case one doesn't.</div>
+      </div>
+      <div class="rule-item">
         <div class="rule-label">Cleanup safety</div>
         <div class="rule-body">Docker: <code>make down</code> (safe) vs. <code>make clean</code> (destroys MongoDB volumes — requires typing confirmation phrase). K8s namespace deletion requires explicit approval. EC2 termination requires typing <code>yes terminate {INSTANCE_ID}</code>. EKS cluster deletion: not automated — engineer runs <code>eksctl delete cluster</code> manually.</div>
       </div>
     </div>
 
-    <div class="note" style="margin-top:12px;"><strong>Every provisioning path always confirms method + CPU/memory before creating anything billable.</strong> New EC2 instance, new EKS cluster, new DocumentDB cluster, and new ElastiCache cluster each show their own vCPU/RAM breakdown and require an explicit "yes" — see the Safety Rules &amp; Guardrails section for the full policy.</div>
+    <div class="note" style="margin-top:12px;"><strong>Every provisioning path always confirms method + CPU/memory before creating anything billable</strong> — and shows what was actually built afterward. New EC2 instance, new EKS cluster, new DocumentDB cluster, and new ElastiCache cluster each show their own vCPU/RAM breakdown and require an explicit "yes" before creation (Steps 2.vm.3 / 2.k8s.1 / 2.k8s.2 / 2.k8s.3), and the environment's actual component versions are confirmed after the fact (Steps 4e / 5f.5) rather than assumed from what was requested — see the Safety Rules &amp; Guardrails section for the full policy.</div>
 
     <div class="table-wrap" style="margin-top:16px;">
       <table>
         <thead><tr><th>Path</th><th>Key steps</th><th>Time estimate</th></tr></thead>
         <tbody>
-          <tr><td>Docker local</td><td>0 → 1 → 2 → 3 → <strong>3d (confirm)</strong> → 4</td><td>~5 min</td></tr>
-          <tr><td>Docker on existing VM</td><td>0 → 1 → 2 (existing) → 3 → <strong>3d (confirm)</strong> → 4</td><td>~10 min</td></tr>
-          <tr><td>Docker on new EC2</td><td>0 → 1 → 2.vm (EC2 provision, confirm w/ vCPU:RAM) → 3 (Docker install) → <strong>3d (confirm)</strong> → 4</td><td>~15–20 min</td></tr>
-          <tr><td>K8s — existing cluster</td><td>0 → 1 → 2.k8s.0–2.k8s.4 → 5a–5c → <strong>5c.5 (confirm)</strong> → 5d–5f</td><td>~20–30 min</td></tr>
-          <tr><td>K8s — new EKS cluster (min)</td><td>0 → 1 → 2.k8s.0–2.k8s.4 (EKS/Mongo/Redis each confirm w/ vCPU:RAM) → 5a–5c → <strong>5c.5 (confirm)</strong> → 5d–5f</td><td>~35–45 min</td></tr>
+          <tr><td>Docker local</td><td>0 → 1 → 2 → 3 → <strong>3d (confirm)</strong> → 4 → <strong>4e (summary)</strong></td><td>~5 min</td></tr>
+          <tr><td>Docker on existing VM</td><td>0 → 1 → 2 (existing) → 3 → <strong>3d (confirm)</strong> → 4 → <strong>4e (summary)</strong></td><td>~10 min</td></tr>
+          <tr><td>Docker on new EC2</td><td>0 → 1 → 2.vm (EC2 provision, confirm w/ vCPU:RAM) → 3 (Docker install) → <strong>3d (confirm)</strong> → 4 → <strong>4e (summary)</strong></td><td>~15–20 min</td></tr>
+          <tr><td>K8s — existing cluster</td><td>0 → 1 → 2.k8s.0–2.k8s.4 → 5a–5c → <strong>5c.5 (confirm)</strong> → 5d–5f → <strong>5f.5 (summary)</strong></td><td>~20–30 min</td></tr>
+          <tr><td>K8s — new EKS cluster (min)</td><td>0 → 1 → 2.k8s.0–2.k8s.4 (EKS/Mongo/Redis each confirm w/ vCPU:RAM) → 5a–5c → <strong>5c.5 (confirm)</strong> → 5d–5f → <strong>5f.5 (summary)</strong></td><td>~35–45 min</td></tr>
           <tr><td>K8s — new EKS cluster (prod)</td><td>same as above</td><td>~40–50 min</td></tr>
-          <tr><td>K8s + ALB ingress</td><td>…5f → 5g</td><td>+5–10 min (ALB provisioning)</td></tr>
-          <tr><td>K8s + adapter PV</td><td>…5f → 5h (PV option)</td><td>+5 min</td></tr>
+          <tr><td>K8s + ALB ingress</td><td>…5f.5 → 5g</td><td>+5–10 min (ALB provisioning)</td></tr>
+          <tr><td>K8s + adapter PV</td><td>…5f.5 → 5h (PV option)</td><td>+5 min</td></tr>
         </tbody>
       </table>
     </div>

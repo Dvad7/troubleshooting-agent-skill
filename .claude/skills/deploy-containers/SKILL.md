@@ -1612,6 +1612,54 @@ echo "✅ repro/${ISD_TICKET_KEY}/.env written — orchestrator will auto-detect
 
 ---
 
+### Step 4f — Post-Build Learnings & Documentation Check
+
+**Run this after every build, successful or not.** The goal is to catch drift between what this skill documents and what actually happened — before that gap causes the next engineer to hit the same surprise unguided.
+
+**Reflect on the session** — answer each honestly, based on what actually happened in this conversation, not what should have happened:
+
+1. Did any command in Steps 0–4e fail in a way not already covered by an existing gotcha callout in this SKILL.md, requiring an improvised workaround?
+2. Did any step take meaningfully longer or shorter than its Quick Reference time estimate (more than ~50% off)?
+3. Did the engineer have to supply information, make a decision, or answer a question this skill's prompts didn't anticipate?
+4. Did any tool, API, or container behave differently than documented — a flag that doesn't exist, a different default, a version requirement that turned out stricter or looser than stated?
+5. Did the actual detected versions (Step 4e) reveal anything worth noting — e.g., a "latest" tag resolving to an unexpectedly old/new version?
+
+**Check whether each "yes" is already documented:**
+
+```bash
+# Search this SKILL.md for an existing callout on the same topic before assuming it's new
+grep -n -i "{keyword from the learning}" .claude/skills/deploy-containers/SKILL.md
+
+# Search the HTML guide too — a learning might already be captured there even if the
+# SKILL.md itself wasn't updated
+grep -n -i "{keyword}" docs/troubleshooting-agent-guide.html
+```
+
+**If every "yes" is already covered:** state so explicitly and stop — do not manufacture a contribution where none is warranted.
+
+**If genuinely new learnings exist, draft the exact addition** (matching the style of existing gotcha callouts elsewhere in this file — bold summary line, symptom, root cause, fix) and present it:
+
+```
+══════════════════════════════════════════════════════════════
+  POST-BUILD LEARNINGS — this session
+══════════════════════════════════════════════════════════════
+  {learning 1}: NEW — not currently documented
+  {learning 2}: already documented at Step {N} — no action
+
+  Proposed addition to .claude/skills/deploy-containers/SKILL.md:
+  ─────────────────────────────────────────────────────────
+  {exact drafted text}
+  ─────────────────────────────────────────────────────────
+
+Contribute this update? [yes → runs /contribute skill-fix deploy-containers
+                          / edit / skip]
+══════════════════════════════════════════════════════════════
+```
+
+**On "yes":** invoke `/contribute skill-fix deploy-containers "{one-line description of the fix}"` to run the branch → write → diff → PR flow — do not write directly to `SKILL.md` outside that flow, even though this skill is repo-native and technically editable directly; routing through `/contribute` keeps every doc change reviewable as a PR rather than a silent edit.
+
+---
+
 ## Step 5 — Kubernetes Deployment
 
 *This section covers DEPLOY_TYPE=k8s only. Steps 3-4 are skipped.*
@@ -2215,6 +2263,48 @@ Print the full build summary:
 kubectl delete pod mongo-version-check redis-version-check -n "${NAMESPACE}" --ignore-not-found 2>/dev/null
 ```
 
+### Step 5f.6 — Post-Build Learnings & Documentation Check
+
+**Run this after every K8s build, successful or not.** Same mechanic as Step 4f (Docker paths) — catch drift between what this skill documents and what actually happened, before it becomes the next engineer's unguided surprise.
+
+**Reflect on the session:**
+
+1. Did any command across Steps 0–5f.5 fail in a way not already covered by an existing gotcha callout (e.g., the ones already documented for `pending-install` releases, the chart's real `storageClass`/flat `env:` schema, ALB provisioning failures, or the default-sample-adapter crash-loop), requiring an improvised fix?
+2. Did EKS provisioning, DocumentDB/ElastiCache provisioning, or the Helm install take meaningfully longer/shorter than the Quick Reference estimates?
+3. Did the engineer have to supply information or make a call this skill's prompts didn't anticipate — an unusual VPC/subnet layout, an IAM permission gap, an unexpected chart schema key?
+4. Did `eksctl`, `helm`, `kubectl`, or the AWS CLI behave differently than documented — a flag renamed/removed, an addon that auto-installed something already covered manually, a different default region/AZ behavior?
+5. Did the actual detected versions (Step 5f.5) reveal anything worth noting?
+
+**Check whether each "yes" is already documented** (search both this file and the HTML guide before assuming something is new):
+
+```bash
+grep -n -i "{keyword from the learning}" .claude/skills/deploy-containers/SKILL.md
+grep -n -i "{keyword}" docs/troubleshooting-agent-guide.html
+```
+
+**If every "yes" is already covered:** say so and stop.
+
+**If genuinely new, draft the addition and present it** (same format as Step 4f):
+
+```
+══════════════════════════════════════════════════════════════
+  POST-BUILD LEARNINGS — this session (Kubernetes)
+══════════════════════════════════════════════════════════════
+  {learning}: NEW — not currently documented
+  {learning}: already documented at Step {N} — no action
+
+  Proposed addition to .claude/skills/deploy-containers/SKILL.md:
+  ─────────────────────────────────────────────────────────
+  {exact drafted text}
+  ─────────────────────────────────────────────────────────
+
+Contribute this update? [yes → runs /contribute skill-fix deploy-containers
+                          / edit / skip]
+══════════════════════════════════════════════════════════════
+```
+
+**On "yes":** invoke `/contribute skill-fix deploy-containers "{one-line description}"` — same reasoning as Step 4f, route through the PR flow rather than editing directly.
+
 ### Step 5g — Ingress (optional — if K8S_HOSTNAME is set)
 
 *Skip if reproducing without an external hostname. Port-forward is sufficient for most repro work.*
@@ -2403,14 +2493,14 @@ fi
 
 | Path | Steps | Time estimate |
 |---|---|---|
-| Docker local | 0 → 1 → 1e → 2 → 3 → **3d (confirm)** → 4 → **4e (summary)** | ~5 min |
-| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → **3d (confirm)** → 4 → **4e (summary)** | ~10 min |
-| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4 **[confirm w/ vCPU:RAM]**, new EC2) → 3 (Docker install) → 3 → **3d (confirm)** → 4 → **4e (summary)** | ~15–20 min |
-| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → **5c.5 (confirm)** → 5d → 5e → 5f → **5f.5 (summary)** | ~20–30 min |
-| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 **[confirm w/ vCPU:RAM]** → 2.k8s.2 **[confirm if new]** → 2.k8s.3 **[confirm if new]** → 2.k8s.4 → 5a–5c → **5c.5 (confirm)** → 5d–5f → **5f.5 (summary)** | ~35–45 min (15-20 for EKS) |
+| Docker local | 0 → 1 → 1e → 2 → 3 → **3d (confirm)** → 4 → **4e (summary)** → **4f (learnings)** | ~5 min |
+| Docker on existing VM | 0 → 1 → 1e → 2 (existing) → 3 → **3d (confirm)** → 4 → **4e (summary)** → **4f (learnings)** | ~10 min |
+| Docker on new EC2 | 0 → 1 → 1e → 2 (2.vm.1–2.vm.4 **[confirm w/ vCPU:RAM]**, new EC2) → 3 (Docker install) → 3 → **3d (confirm)** → 4 → **4e (summary)** → **4f (learnings)** | ~15–20 min |
+| K8s — existing cluster | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.2 → 2.k8s.3 → 2.k8s.4 → 5a → 5b → 5c → **5c.5 (confirm)** → 5d → 5e → 5f → **5f.5 (summary)** → **5f.6 (learnings)** | ~20–30 min |
+| K8s — new EKS cluster (min) | 0 → 1 → 1e → 2.k8s.0 → 2.k8s.1 **[confirm w/ vCPU:RAM]** → 2.k8s.2 **[confirm if new]** → 2.k8s.3 **[confirm if new]** → 2.k8s.4 → 5a–5c → **5c.5 (confirm)** → 5d–5f → **5f.5 (summary)** → **5f.6 (learnings)** | ~35–45 min (15-20 for EKS) |
 | K8s — new EKS cluster (prod) | same as above | ~40–50 min |
-| K8s + ingress | …5f.5 → 5g | +5–10 min (ALB provisioning) |
-| K8s + adapter PV | …5f.5 → 5h (option 1) | +5 min |
+| K8s + ingress | …5f.6 → 5g | +5–10 min (ALB provisioning) |
+| K8s + adapter PV | …5f.6 → 5h (option 1) | +5 min |
 | Any path reusing an existing DB (Step 1e confirmed) | skips 2.k8s.2/2.k8s.3 or dev-stack's bundled Mongo/Redis | −5–10 min |
 
 **Confirmation gates that show method + CPU/memory before creating anything billable:**
@@ -2432,6 +2522,15 @@ fi
 | Step 5f.5 | Any K8s path, after health check passes | Cluster name/version/node count, actual Platform/MongoDB/Redis/Gateway versions (queried via pod image tags and throwaway probe pods), adapter storage method, saved config path |
 
 `/themis-aws-deploy` has the equivalent as Step 6c (`LOCAL-EXTENSIONS.md`) — a per-role host/version table sourced from `run-vars.yml` (`platform_release`/`gateway_release`) and the certify reports' actual MongoDB/Redis version lines, supplementing the vendor's own End-of-run summary.
+
+**Post-build learnings check — the last step of every build, always:**
+
+| Step | Fires when | Does |
+|---|---|---|
+| Step 4f | Any Docker path, after Step 4e | Reflects on the session for undocumented gotchas, timing drift, unanticipated decisions, or tooling surprises; checks this SKILL.md and the HTML guide before assuming anything is new; drafts a fix and offers `/contribute skill-fix deploy-containers` |
+| Step 5f.6 | Any K8s path, after Step 5f.5 | Same mechanic, K8s-specific reflection questions (EKS/DocumentDB/ElastiCache/Helm surprises) |
+
+`/themis-aws-deploy` has the equivalent as Step 6d (`LOCAL-EXTENSIONS.md`) — same reflection questions adapted for Ansible/`tofu`/AWS specifics, drafts as a proper `[OVERRIDE]`/`[INSERT AFTER Step N]` extension section (never a raw diff of the vendor `SKILL.md`), and routes through `/contribute skill-fix themis-aws-deploy`, which detects the vendor-sync status and automatically targets `LOCAL-EXTENSIONS.md` instead of `SKILL.md`.
 
 **EKS node sizing (from docs.itential.com):**
 

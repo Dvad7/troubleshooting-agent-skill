@@ -1108,3 +1108,66 @@ cat <ENV_DIR>/inventory/hosts
 
 This table supplements — does not replace — the vendor's own "End-of-run summary" bullet
 list (deployment state, certify verdict, report locations). Present both.
+
+---
+
+## [INSERT AFTER Step 6c] Step 6d — Post-Build Learnings & Documentation Check
+
+**Run this after every build, successful or not.** `/deploy-containers` runs the same check
+(its Step 4f/5f.6) — this is the Themis equivalent, adapted for the fact that any fix here
+must land in this file, never in the vendor `SKILL.md`.
+
+**Reflect on the session:**
+
+1. Did any Ansible task, `tofu` command, or preflight check in Steps 0–6c fail in a way not
+   already covered by an existing gotcha in this file or `references/troubleshooting.md`,
+   requiring an improvised fix?
+2. Did provisioning, the deployer run, or certify take meaningfully longer/shorter than the
+   Section 9 runtime table's estimate for this architecture?
+3. Did the engineer have to supply information or make a call the Pre-Build Confirmation Gate
+   (Step 2a) didn't anticipate — an unusual VPC/subnet setup, a missing IAM permission, a
+   `run-vars.yml` field whose accepted values weren't clear from its comment?
+4. Did `eksctl`, `tofu`, `ansible-playbook`, or an AWS API behave differently than documented —
+   a renamed/removed flag, a different default, a stricter or looser version requirement?
+5. Did the actual versions from Step 6c's summary table reveal anything worth noting — e.g. the
+   Themis pinned default resolving to an unexpected MongoDB version?
+
+**Check whether each "yes" is already documented** — search this file and the HTML guide,
+not just memory of what "should" be documented:
+
+```bash
+grep -n -i "{keyword from the learning}" .claude/skills/themis-aws-deploy/LOCAL-EXTENSIONS.md
+grep -n -i "{keyword}" .claude/skills/themis-aws-deploy/references/troubleshooting.md
+grep -n -i "{keyword}" docs/troubleshooting-agent-guide.html
+```
+
+**If every "yes" is already covered:** say so and stop — do not manufacture a contribution.
+
+**If genuinely new, draft the addition** as a proper `[OVERRIDE]` or `[INSERT AFTER Step N]`
+section (never a raw note appended to the end — it needs to anchor to the vendor step it
+relates to, same as every other section in this file) and present it:
+
+```
+══════════════════════════════════════════════════════════════
+  POST-BUILD LEARNINGS — this session (Themis / <architecture>)
+══════════════════════════════════════════════════════════════
+  {learning}: NEW — not currently documented
+  {learning}: already documented in {file}:{line} — no action
+
+  Proposed addition to .claude/skills/themis-aws-deploy/LOCAL-EXTENSIONS.md:
+  ─────────────────────────────────────────────────────────
+  ## [INSERT AFTER Step {N}] Step {N}a — {short title}
+  {drafted content — structural instructions only, no plaintext AWS/env/account
+   config per the Vendor Skill Extension Policy}
+  ─────────────────────────────────────────────────────────
+
+Contribute this update? [yes → runs /contribute skill-fix themis-aws-deploy
+                          / edit / skip]
+══════════════════════════════════════════════════════════════
+```
+
+**On "yes":** invoke `/contribute skill-fix themis-aws-deploy "{one-line description}"`.
+`/contribute` detects that `themis-aws-deploy` is vendor-synced (via
+`vendor/platform-skills/SYNC_MANIFEST.json`) and automatically targets
+`LOCAL-EXTENSIONS.md` instead of the vendor `SKILL.md` — never write this fix directly
+outside that flow.

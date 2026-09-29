@@ -2038,7 +2038,7 @@ flowchart TD
   <div class="section">
     <div class="section-label">Reproduction</div>
     <h2>Reproduction Environment Capabilities</h2>
-    <p class="desc"><span class="inline-code">/troubleshoot</span> Phase 3 (Reproduce &amp; Workaround) can investigate or reproduce a confirmed root cause five different ways — from zero-setup (the customer's own live environment) up to a full multi-VM AWS topology matching the customer's exact architecture. Building an isolated environment is the exception, not the default: most investigations never leave the customer's live environment. This tab is the decision guide for when an isolated build is warranted and which of the three build methods fits.</p>
+    <p class="desc"><span class="inline-code">/troubleshoot</span> Phase 3 (Reproduce &amp; Workaround) can investigate or reproduce a confirmed root cause five different ways — from zero-setup (the customer's own live environment, or one a prior session already deployed) up to a full multi-VM AWS topology matching the customer's exact architecture. Building a new isolated environment is the exception, not the default: most investigations never leave the customer's live environment, and Step 3a always checks for an already-deployed one before anything new gets built. This tab is the decision guide for when a new build is actually warranted and which of the three build methods fits.</p>
   </div>
 
   <div class="section">
@@ -2049,7 +2049,7 @@ flowchart TD
 flowchart TD
     START["Confirmed root cause&lt;br/&gt;(Phase 2)"] --> Q1{"Does confirming it&lt;br/&gt;require any writes to&lt;br/&gt;the customer's system?"}
 
-    Q1 -->|"No — read-only&lt;br/&gt;API/log/config check"| LIVE["Customer's live environment&lt;br/&gt;No build needed"]
+    Q1 -->|"No — read-only&lt;br/&gt;API/log/config check"| LIVE["Customer's live environment,&lt;br/&gt;or an already-deployed one&lt;br/&gt;No build needed"]
 
     Q1 -->|"Yes — restart, settings&lt;br/&gt;change, adapter install,&lt;br/&gt;workflow that writes data"| Q2{"Kubernetes/Helm-specific,&lt;br/&gt;or orchestration&lt;br/&gt;fidelity matters?"}
 
@@ -2088,13 +2088,13 @@ flowchart TD
         <thead><tr><th>Option</th><th>Setup time</th><th>Cost</th><th>Fidelity to customer topology</th><th>Best for</th><th>Safety gates</th><th>Invoke via</th></tr></thead>
         <tbody>
           <tr>
-            <td>Customer's live environment</td>
+            <td>Customer's live environment, or an already-deployed one</td>
             <td>None — already exists</td>
             <td>None</td>
-            <td>Perfect — it <em>is</em> the customer environment</td>
-            <td>Read-only diagnosis; confirming root cause without altering anything</td>
-            <td>No writes without explicit engineer approval</td>
-            <td><span class="inline-code">/troubleshoot</span> Step 3a — select the customer <span class="inline-code">.env</span></td>
+            <td>Perfect for the customer's own system; whatever a prior build left behind for an already-deployed one</td>
+            <td>Read-only diagnosis on the customer's system; re-using a repro environment a prior session already built instead of building a new one</td>
+            <td>No writes without explicit engineer approval (customer system); none needed for an already-deployed repro environment</td>
+            <td><span class="inline-code">/troubleshoot</span> Step 3a — select from the discovered <span class="inline-code">.env</span> files (customer <span class="inline-code">.env</span>, or a prior <span class="inline-code">environments/*.env</span> / <span class="inline-code">repro/{TICKET}/.env</span>)</td>
           </tr>
           <tr>
             <td>Docker local</td>
@@ -2144,8 +2144,8 @@ flowchart TD
     <div class="cards" style="margin-bottom:24px;">
       <div class="card t-olive">
         <div class="icon">LV</div>
-        <h3>Customer's Live Environment</h3>
-        <p>Default choice for most investigations. Confirming root cause via API calls, log inspection, or config comparison needs no isolated build at all — Docker is not required to investigate live environments.</p>
+        <h3>Customer's Live Environment — or an Already-Deployed One</h3>
+        <p>Default choice for most investigations. Confirming root cause via API calls, log inspection, or config comparison needs no isolated build at all — Docker is not required to investigate live environments. Also check Step 3a's discovered <span class="inline-code">.env</span> list first: if a prior session already built a Docker/K8s/Themis repro environment for this ticket (or a shared one exists under <span class="inline-code">environments/</span>), reuse it instead of building a new one.</p>
       </div>
       <div class="card t-blue">
         <div class="icon">DL</div>
@@ -2178,11 +2178,11 @@ flowchart TD
     <div class="rule-list">
       <div class="rule-item">
         <div class="rule-label">Step 3a</div>
-        <div class="rule-body">Scans the entire project tree for <span class="inline-code">.env</span> files, presents them to the engineer with a summary of what each unlocks, and authenticates once one is selected. Token cached in <span class="inline-code">.auth.json</span> for 50 minutes.</div>
+        <div class="rule-body">Scans the entire project tree for <span class="inline-code">.env</span> files — the customer's own, plus any <span class="inline-code">environments/*.env</span> or <span class="inline-code">repro/{TICKET}/.env</span> a prior session already built — presents them to the engineer with a summary of what each unlocks, and authenticates once one is selected. Token cached in <span class="inline-code">.auth.json</span> for 50 minutes. An already-deployed repro environment found here means Layer 2 below never needs to run.</div>
       </div>
       <div class="rule-item">
         <div class="rule-label">Step 3b — branch</div>
-        <div class="rule-body">If the engineer selected a customer environment, run the confirmed trigger steps directly — no writes without explicit approval. If an isolated environment is wanted, the new Decision Guidance runs first: Layer 1 checks whether reproduction needs any writes at all (if not, stay on the customer's live environment); Layer 2, only reached when isolation is warranted, picks which build method fits the root cause.</div>
+        <div class="rule-body">If the engineer selected the customer's environment or an already-deployed repro environment from Step 3a, run the confirmed trigger steps directly — no writes without explicit approval on the customer's system. If no suitable environment exists yet and a new isolated build is wanted, the new Decision Guidance runs first: Layer 1 checks whether reproduction needs any writes at all (if not, stay on the customer's live environment); Layer 2, only reached when isolation is warranted, picks which build method fits the root cause.</div>
       </div>
       <div class="rule-item">
         <div class="rule-label">Step 3b.0</div>

@@ -1993,6 +1993,43 @@ flowchart TD
       <div class="note" style="margin-top:10px;"><strong>Then Step 6d checks whether anything from this build needs to be fed back into the skill.</strong> It reflects on undocumented failures, timing drift against the Section 9 runtime table, or unanticipated decisions the confirmation gate didn't ask about — checking <code>LOCAL-EXTENSIONS.md</code>, <code>references/troubleshooting.md</code>, and the HTML guide before assuming anything is new. A genuine finding gets drafted as a proper <code>[OVERRIDE]</code>/<code>[INSERT AFTER Step N]</code> section and offered via <code>/contribute skill-fix themis-aws-deploy</code> — which automatically targets <code>LOCAL-EXTENSIONS.md</code>, never the vendor <code>SKILL.md</code>.</div>
     </div>
 
+    <div class="section">
+      <div class="section-label">Kubernetes</div>
+      <h2 class="section-heading">Kubernetes / EKS Prerequisites</h2>
+      <p style="margin:0 0 10px;color:var(--muted);">Covers both cluster types <span class="inline-code">/deploy-containers k8s</span> supports — a newly provisioned or existing AWS EKS cluster, and a pre-existing local <span class="inline-code">kind</span> cluster. The skill detects which one is active (<span class="inline-code">kubectl config current-context</span> showing <span class="inline-code">kind-&lt;name&gt;</span>) and the rest of the flow applies identically; only image-pull mechanics differ.</p>
+
+      <div class="table-wrap" style="margin-top:10px;">
+        <table>
+          <thead><tr><th>Tool</th><th>Needed for</th><th>Install</th></tr></thead>
+          <tbody>
+            <tr><td><code>kubectl</code></td><td>Both paths</td><td><code>brew install kubectl</code></td></tr>
+            <tr><td><code>helm</code> 3.15+</td><td>Both paths</td><td><code>brew install helm</code></td></tr>
+            <tr><td><code>eksctl</code> ≥ 0.190</td><td>EKS only — cluster provisioning, IRSA roles</td><td><code>brew install eksctl</code></td></tr>
+            <tr><td>AWS CLI v2</td><td>EKS only — ECR auth, cluster ops, ElastiCache</td><td><code>brew install awscli</code></td></tr>
+            <tr><td><code>kind</code></td><td>Local cluster path only</td><td><code>brew install kind</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="warning" style="margin-top:14px;"><strong>Gotcha — Apple Silicon (arm64) <code>kind</code> nodes cannot pull amd64-only images the normal way.</strong> Unlike <code>docker run</code>, which transparently emulates amd64 via QEMU, containerd inside a <code>kind</code> node performs strict CRI platform matching and fails (or silently picks the wrong manifest) on an amd64-only image — this hits the IAG5 image specifically. Fix: pull on the host with <code>docker pull --platform linux/amd64</code>, then <code>kind load docker-image</code> to side-load it directly into the node's containerd. EKS worker nodes never hit this — the image always matches their platform.</div>
+
+      <div class="danger" style="margin-top:10px;"><strong>cert-manager is required, not optional — and must be installed cluster-wide, never as a per-chart subchart.</strong> Setting <code>certManager.enabled: true</code> inside the <code>iap</code>/<code>iag5</code> Helm values causes a chicken-and-egg problem: the chart needs cert-manager's CRDs to already exist before it can even dry-run. Install cert-manager once, cluster-wide, then set <code>certManager.enabled: false</code> in every chart's values — the chart still creates its own <code>Issuer</code>/<code>Certificate</code> objects. Related: a <code>ClusterIssuer</code>'s CA secret is looked up in the <strong>cert-manager namespace</strong>; a namespaced <code>Issuer</code>'s CA secret is looked up in <strong>its own namespace</strong>. The <code>iap</code> chart defaults to <code>ClusterIssuer</code>, <code>iag5</code> defaults to <code>Issuer</code> — if both charts share one CA, copy the secret into both namespaces explicitly.</div>
+
+      <div class="note" style="margin-top:10px;"><strong>Local <code>kind</code> sizing:</strong> every workload runs on the Mac itself, so Docker Desktop's configured resource allocation (Settings → Resources) is the effective ceiling for the whole cluster. Size it to at least the minimum grade (4 vCPU / 16 GB) — IAP's own resource needs don't change based on where the cluster runs.</div>
+
+      <div class="section-label" style="margin-top:20px;">Pre-Run Checklist</div>
+      <h2 class="section-heading" style="font-size:15px;">Kubernetes Pre-Build Checklist</h2>
+      <div class="prereq-checklist">
+        <div class="prereq-check-item"><div class="prereq-check-box"></div><span>Cluster type decided — new/existing EKS, or a pre-existing local <code>kind</code> cluster — and <code>kubectl config current-context</code> confirmed pointing at it</span></div>
+        <div class="prereq-check-item"><div class="prereq-check-box"></div><span>cert-manager installed cluster-wide (not left to a chart's <code>certManager.enabled: true</code>)</span></div>
+        <div class="prereq-check-item"><div class="prereq-check-box"></div><span>External MongoDB and Redis reachable from inside the cluster — the IAP Helm chart bundles neither</span></div>
+        <div class="prereq-check-item"><div class="prereq-check-box"></div><span>No stale <code>pending-install</code> Helm release on this cluster from a prior interrupted session (<code>helm list -n itential --pending</code>)</span></div>
+        <div class="prereq-check-item"><div class="prereq-check-box"></div><span>If Apple Silicon + local <code>kind</code>: aware of the arm64 image-pull gotcha above before the IAG5 Helm install</span></div>
+        <div class="prereq-check-item"><div class="prereq-check-box"></div><span>Cost acknowledged (EKS path only) — EKS cluster + nodes + any provisioned DocumentDB/ElastiCache accrue AWS spend until destroyed</span></div>
+      </div>
+      <div class="note" style="margin-top:10px;">Full mechanics for both paths: <button onclick="showTab('subskills')" style="background:none;border:none;color:var(--pink-soft);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;">Sub-Skills → /deploy-containers</button>. Deeper reference: <code>.claude/skills/deploy-containers/references/k8s-prerequisites.md</code>.</div>
+    </div>
+
   </div>
 </div>
 

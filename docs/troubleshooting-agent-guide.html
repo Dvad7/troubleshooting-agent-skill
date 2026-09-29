@@ -902,6 +902,7 @@
   <button class="tab-btn" onclick="showTab('exec')">&#9642; Executive Summary</button>
   <button class="tab-btn active" onclick="showTab('overview')">&#9642; Overview &amp; Architecture</button>
   <button class="tab-btn" onclick="showTab('prereqs')">&#9642; Prerequisites</button>
+  <button class="tab-btn" onclick="showTab('environments')">&#9642; Environments</button>
   <button class="tab-btn" onclick="showTab('user')">&#9642; User Guide</button>
   <button class="tab-btn" onclick="showTab('admin')">&#9642; Admin Guide</button>
   <button class="tab-btn" onclick="showTab('subskills')">&#9642; Sub-Skills Reference</button>
@@ -1993,6 +1994,204 @@ flowchart TD
     </div>
 
   </div>
+</div>
+
+<div id="tab-environments" class="tab-content">
+
+  <div class="section">
+    <div class="section-label">Reproduction</div>
+    <h2>Reproduction Environment Capabilities</h2>
+    <p class="desc"><span class="inline-code">/troubleshoot</span> Phase 3 (Reproduce &amp; Workaround) can investigate or reproduce a confirmed root cause five different ways — from zero-setup (the customer's own live environment) up to a full multi-VM AWS topology matching the customer's exact architecture. Building an isolated environment is the exception, not the default: most investigations never leave the customer's live environment. This tab is the decision guide for when an isolated build is warranted and which of the three build methods fits.</p>
+  </div>
+
+  <div class="section">
+    <h2>Decision Tree</h2>
+    <p class="desc">This is the logic <span class="inline-code">/troubleshoot</span> Phase 3 now uses to open with a stated recommendation before showing the deployment-type menu, and the same logic <span class="inline-code">/deploy-containers</span> uses when invoked standalone.</p>
+    <div class="diagram-card">
+      <div class="mermaid">
+flowchart TD
+    START["Confirmed root cause&lt;br/&gt;(Phase 2)"] --> Q1{"Does confirming it&lt;br/&gt;require any writes to&lt;br/&gt;the customer's system?"}
+
+    Q1 -->|"No — read-only&lt;br/&gt;API/log/config check"| LIVE["Customer's live environment&lt;br/&gt;No build needed"]
+
+    Q1 -->|"Yes — restart, settings&lt;br/&gt;change, adapter install,&lt;br/&gt;workflow that writes data"| Q2{"Kubernetes/Helm-specific,&lt;br/&gt;or orchestration&lt;br/&gt;fidelity matters?"}
+
+    Q2 -->|"Yes"| K8S["Kubernetes / EKS&lt;br/&gt;via /deploy-containers"]
+
+    Q2 -->|"No"| Q3{"Needs OS-level fidelity —&lt;br/&gt;systemd, upgrade paths,&lt;br/&gt;HA replica sets,&lt;br/&gt;multi-host topology?"}
+
+    Q3 -->|"Yes"| THEMIS["Themis — full VM topology&lt;br/&gt;via /themis-aws-deploy"]
+
+    Q3 -->|"No"| Q4{"Needs network isolation&lt;br/&gt;from your own machine?"}
+
+    Q4 -->|"Yes"| VM["Docker on VM&lt;br/&gt;via /deploy-containers"]
+
+    Q4 -->|"No"| LOCAL["Docker local — default&lt;br/&gt;via /deploy-containers"]
+
+    style START fill:#14173a,stroke:#ec1e7f,color:#e9eaf2
+    style Q1 fill:#1a1d3e,stroke:#3d9be8,color:#e9eaf2
+    style Q2 fill:#1a1d3e,stroke:#3d9be8,color:#e9eaf2
+    style Q3 fill:#1a1d3e,stroke:#3d9be8,color:#e9eaf2
+    style Q4 fill:#1a1d3e,stroke:#3d9be8,color:#e9eaf2
+    style LIVE fill:#0a1a0a,stroke:#b8c22e,color:#e9eaf2
+    style K8S fill:#1a0e1e,stroke:#e84d9b,color:#e9eaf2
+    style THEMIS fill:#1a0808,stroke:#e84d4d,color:#e9eaf2
+    style VM fill:#1a0a2e,stroke:#9b4de8,color:#e9eaf2
+    style LOCAL fill:#081422,stroke:#3d9be8,color:#e9eaf2
+      </div>
+    </div>
+  </div>
+
+  <hr class="section-divider" />
+
+  <div class="section">
+    <h2>Comparison Matrix</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Option</th><th>Setup time</th><th>Cost</th><th>Fidelity to customer topology</th><th>Best for</th><th>Safety gates</th><th>Invoke via</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Customer's live environment</td>
+            <td>None — already exists</td>
+            <td>None</td>
+            <td>Perfect — it <em>is</em> the customer environment</td>
+            <td>Read-only diagnosis; confirming root cause without altering anything</td>
+            <td>No writes without explicit engineer approval</td>
+            <td><span class="inline-code">/troubleshoot</span> Step 3a — select the customer <span class="inline-code">.env</span></td>
+          </tr>
+          <tr>
+            <td>Docker local</td>
+            <td>~5 min</td>
+            <td>None (your machine)</td>
+            <td>Low — single-process Compose stack, no OS-level behavior</td>
+            <td>Generic workflow/adapter/JST/API/UI bugs</td>
+            <td>Step 3d (method + container limits) → Step 4e (actual versions) → Step 4f (learnings check)</td>
+            <td><span class="inline-code">/deploy-containers docker-local</span></td>
+          </tr>
+          <tr>
+            <td>Docker on VM</td>
+            <td>~10–20 min</td>
+            <td>EC2 cost only if a new VM is provisioned</td>
+            <td>Medium — real VM, simplified topology</td>
+            <td>Same as Docker local, plus network isolation from your own machine</td>
+            <td>Step 2.vm.3 (vCPU/RAM if new EC2) → Step 3d → Step 4e → Step 4f</td>
+            <td><span class="inline-code">/deploy-containers docker-vm</span></td>
+          </tr>
+          <tr>
+            <td>Kubernetes / EKS</td>
+            <td>~20–50 min</td>
+            <td>EKS cluster + node costs (ongoing until torn down)</td>
+            <td>High if the customer's deployment is K8s-based</td>
+            <td>Kubernetes/Helm-specific root causes; OSS Helm chart bugs</td>
+            <td>Step 2.k8s.1/2.k8s.2/2.k8s.3 (vCPU/RAM per resource) → Step 5c.5 (consolidated) → Step 5f.5 (actual versions) → Step 5f.6 (learnings check)</td>
+            <td><span class="inline-code">/deploy-containers k8s</span></td>
+          </tr>
+          <tr>
+            <td>Themis (full VM topology)</td>
+            <td>~45–70 min (aio) up to longer for ha2/asa</td>
+            <td>EC2 cost for every VM in the architecture (ongoing until destroyed)</td>
+            <td>High — matches bare-metal/VM multi-host topology and HA architectures</td>
+            <td>OS-level reproduction: init scripts, systemd, upgrade paths, replica-set/Sentinel HA, multi-host network issues</td>
+            <td>Step 2a Pre-Build Confirmation Gate (per-role CPU/Memory Breakdown) → Step 6c (actual versions) → Step 6d (learnings check)</td>
+            <td><span class="inline-code">/themis-aws-deploy</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <hr class="section-divider" />
+
+  <div class="section">
+    <h2>When To Pick Each</h2>
+    <div class="cards" style="margin-bottom:24px;">
+      <div class="card t-olive">
+        <div class="icon">LV</div>
+        <h3>Customer's Live Environment</h3>
+        <p>Default choice for most investigations. Confirming root cause via API calls, log inspection, or config comparison needs no isolated build at all — Docker is not required to investigate live environments.</p>
+      </div>
+      <div class="card t-blue">
+        <div class="icon">DL</div>
+        <h3>Docker Local</h3>
+        <p>The issue is application-level — a workflow, adapter, JST script, API response, or UI bug — and doesn't depend on OS behavior, orchestration, or multi-host topology. Fastest path when an isolated build is warranted.</p>
+      </div>
+      <div class="card t-purple">
+        <div class="icon">VM</div>
+        <h3>Docker on VM</h3>
+        <p>Same profile as Docker local, but you need network isolation — something must be reachable from elsewhere, or your own machine can't run Docker or has conflicting local services.</p>
+      </div>
+      <div class="card t-magenta">
+        <div class="icon">K8</div>
+        <h3>Kubernetes / EKS</h3>
+        <p>The confirmed root cause is Kubernetes/Helm-specific (pod scheduling, StorageClass, ingress, chart schema), the customer runs on K8s and orchestration fidelity matters, or it's an OSS Helm chart bug.</p>
+      </div>
+      <div class="card t-red">
+        <div class="icon">TH</div>
+        <h3>Themis — Full VM Topology</h3>
+        <p>Root cause needs OS-level fidelity: systemd/init scripts, RPM install/upgrade paths, MongoDB replica-set or Redis Sentinel HA behavior, multi-host network topology, or matching the customer's exact architecture (aio/minimal/ha2/asa).</p>
+      </div>
+    </div>
+  </div>
+
+  <hr class="section-divider" />
+
+  <div class="section">
+    <h2>How <span class="inline-code">/troubleshoot</span> Leverages This</h2>
+    <p class="desc">Phase 3's steps, in order, and where the decision guidance above now plugs in:</p>
+    <div class="rule-list">
+      <div class="rule-item">
+        <div class="rule-label">Step 3a</div>
+        <div class="rule-body">Scans the entire project tree for <span class="inline-code">.env</span> files, presents them to the engineer with a summary of what each unlocks, and authenticates once one is selected. Token cached in <span class="inline-code">.auth.json</span> for 50 minutes.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Step 3b — branch</div>
+        <div class="rule-body">If the engineer selected a customer environment, run the confirmed trigger steps directly — no writes without explicit approval. If an isolated environment is wanted, the new Decision Guidance runs first: Layer 1 checks whether reproduction needs any writes at all (if not, stay on the customer's live environment); Layer 2, only reached when isolation is warranted, picks which build method fits the root cause.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Step 3b.0</div>
+        <div class="rule-body">Opens with the Layer 2 recommendation stated in plain language (e.g. "this looks like a Helm chart StorageClass issue — I'd suggest Kubernetes"), then shows the numbered menu for the engineer to confirm or override. Options 1–3 invoke <span class="inline-code">/deploy-containers</span>; option 4 invokes <span class="inline-code">/themis-aws-deploy</span>. No preference stated defaults to Docker local.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Step 3b.1</div>
+        <div class="rule-body">Scaffolds an isolated <span class="inline-code">repro/{ISD_TICKET_KEY}/.env</span> to keep reproduction credentials separate from customer credentials — skipped if <span class="inline-code">/deploy-containers</span> already created it.</div>
+      </div>
+      <div class="rule-item">
+        <div class="rule-label">Standalone invocation</div>
+        <div class="rule-body"><span class="inline-code">/deploy-containers</span> and <span class="inline-code">/themis-aws-deploy</span> can also be invoked directly, outside a <span class="inline-code">/troubleshoot</span> session — <span class="inline-code">/deploy-containers</span>'s own Step 0 carries the same Layer 2 questions for when no Phase 2 diagnosis context is available.</div>
+      </div>
+    </div>
+  </div>
+
+  <hr class="section-divider" />
+
+  <div class="section">
+    <h2>Safety &amp; Post-Build Gates</h2>
+    <p class="desc">Every build method — Docker, Kubernetes, and Themis — carries the same three-part safety pattern. Full mechanics live in the Sub-Skills and Admin tabs; this is the cross-reference.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Gate</th><th>What it guarantees</th><th>Where</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Pre-build confirmation</td>
+            <td>Method + exact CPU/memory for every component shown before anything billable is created; explicit "yes" required</td>
+            <td><span class="inline-code">/deploy-containers</span> Steps 2.vm.3 / 2.k8s.1 / 2.k8s.2 / 2.k8s.3 / 3d / 5c.5 — see <button onclick="showTab('subskills')" style="background:none;border:none;color:var(--pink-soft);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;">Sub-Skills → /deploy-containers</button>; Themis Step 2a — see <button onclick="showTab('prereqs')" style="background:none;border:none;color:var(--pink-soft);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;">Prerequisites → Themis Pre-Run Checklist</button></td>
+          </tr>
+          <tr>
+            <td>Post-build component summary</td>
+            <td>Actual running versions confirmed after the fact — never assumed from the requested tag or engine version</td>
+            <td><span class="inline-code">/deploy-containers</span> Steps 4e / 5f.5; Themis Step 6c — see <button onclick="showTab('admin')" style="background:none;border:none;color:var(--pink-soft);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;">Admin Guide → Environment Build Setup</button></td>
+          </tr>
+          <tr>
+            <td>Post-build learnings check</td>
+            <td>Reflects on the session for undocumented gotchas or timing drift; drafts a fix via <span class="inline-code">/contribute skill-fix</span> only when genuinely new — never manufactures a contribution</td>
+            <td><span class="inline-code">/deploy-containers</span> Steps 4f / 5f.6; Themis Step 6d — see <button onclick="showTab('subskills')" style="background:none;border:none;color:var(--pink-soft);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;">Sub-Skills → /contribute</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note" style="margin-top:12px;">Full access-requirement details (credentials, tokens, IAM policy) for every method are in the <button onclick="showTab('prereqs')" style="background:none;border:none;color:var(--pink-soft);cursor:pointer;text-decoration:underline;font-size:inherit;padding:0;">Prerequisites tab</button> — the Capability Access Matrix and AWS IAM Requirements sections apply here too.</div>
+  </div>
+
 </div>
 
 <div id="tab-user" class="tab-content">
@@ -5342,6 +5541,29 @@ tofu destroy \
     event.currentTarget.classList.add('active');
     window.scrollTo(0, 0);
     buildToc(name);
+    recoverMermaidIn(name);
+  }
+
+  /* Mermaid with startOnLoad:true renders every .mermaid div at page-load time, including
+     ones inside a hidden (non-default) tab — those can fail because the container can't be
+     measured while display:none. Snapshot each diagram's pristine source now, before mermaid
+     ever touches it, so a failed one can be restored and retried once its tab is actually shown. */
+  document.querySelectorAll('.mermaid').forEach(function(el) {
+    el.dataset.mermaidSrc = el.textContent;
+  });
+
+  function recoverMermaidIn(name) {
+    if (typeof mermaid === 'undefined') return;
+    const tab = document.getElementById('tab-' + name);
+    if (!tab) return;
+    tab.querySelectorAll('.mermaid').forEach(function(el) {
+      const broken = !el.querySelector('svg') || el.querySelector('.error-icon');
+      if (broken && el.dataset.mermaidSrc) {
+        el.removeAttribute('data-processed');
+        el.textContent = el.dataset.mermaidSrc;
+        mermaid.run({ nodes: [el] }).catch(function() {});
+      }
+    });
   }
 
   /* Build TOC for the default active tab on page load */

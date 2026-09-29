@@ -25,6 +25,13 @@ Provisions an Itential Platform reproduction environment using Docker Compose (l
 
 ## Step 0 — Select Deployment Type
 
+**If invoked standalone (not via `/troubleshoot` Phase 3, so no confirmed root cause is available yet), ask these questions before presenting the menu** — when invoked from `/troubleshoot`, the orchestrator's Phase 3 decision guidance already supplies a recommendation, so skip straight to the menu with that recommendation stated first:
+
+- Is the issue Kubernetes/Helm-specific (pod scheduling, StorageClass, ingress, chart values schema), or does the customer's deployment orchestration fidelity matter? → **Kubernetes**
+- Does reproduction need OS-level fidelity — systemd/init scripts, RPM install/upgrade paths, MongoDB replica-set or Redis Sentinel HA behavior, multi-host network topology, or matching a specific architecture (aio/minimal/ha2/asa)? → **VMs on AWS (Themis)**
+- Otherwise, is network isolation from this machine needed (something must be reachable from elsewhere, or this machine can't run Docker)? → **Docker on VM**
+- Otherwise → **Docker local** (default — generic application-level bugs: workflow/adapter/JST/API/UI logic)
+
 Present the menu:
 
 ```
